@@ -114,8 +114,6 @@ export async function POST(request: Request) {
   }
 }
 
-type GifEncoderFrameInput = Parameters<GIFEncoder['addFrame']>[0];
-
 function validatePayload(payload: RenderGifPayload) {
   if (!payload || typeof payload !== 'object') {
     throw new Error('Invalid render payload.');
@@ -160,7 +158,7 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
     drawObjects(context, objects, lines, frameIndex, totalFrames);
 
     const frame = context.getImageData(0, 0, width, height);
-    encoder.addFrame(frame as unknown as GifEncoderFrameInput);
+    encoder.addFrame(Buffer.from(frame.data));
   }
 
   encoder.finish();
