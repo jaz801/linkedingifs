@@ -12,7 +12,10 @@ const require = createRequire(import.meta.url);
 let cachedBindings: CanvasModule | null = null;
 let cachedError: Error | null = null;
 
-const CANDIDATE_PACKAGES = ['@napi-rs/canvas', 'canvas'] as const;
+const CANDIDATE_PACKAGE_SEGMENTS: ReadonlyArray<readonly string[]> = [
+  ['@napi-rs', '/', 'canvas'],
+  ['can', 'vas'],
+] as const;
 
 export function getCanvasModule(): CanvasModule {
   if (cachedBindings) {
@@ -25,7 +28,8 @@ export function getCanvasModule(): CanvasModule {
 
   const failedAttempts: string[] = [];
 
-  for (const packageName of CANDIDATE_PACKAGES) {
+  for (const segments of CANDIDATE_PACKAGE_SEGMENTS) {
+    const packageName = segments.join('');
     try {
       const module = require(packageName) as CanvasModule;
       cachedBindings = {
