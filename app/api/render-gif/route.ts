@@ -334,7 +334,7 @@ function getEncoderBuffer(encoder: GIFEncoder & { out?: { getData?: () => Buffer
   return data;
 }
 
-function toArrayBuffer(buffer: Buffer) {
+function toArrayBuffer(buffer: Buffer): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
