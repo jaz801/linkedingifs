@@ -7,11 +7,24 @@ type ReportClientErrorOptions = {
 
 function serializeError(error: unknown) {
   if (error instanceof Error) {
-    return {
+    const base: Record<string, unknown> = {
       message: error.message,
       stack: error.stack,
       name: error.name,
     };
+
+    for (const key of Object.keys(error)) {
+      if (key in base) {
+        continue;
+      }
+      base[key] = (error as Record<string, unknown>)[key];
+    }
+
+    if ('cause' in error) {
+      base.cause = (error as Error & { cause?: unknown }).cause ?? null;
+    }
+
+    return base;
   }
 
   if (typeof error === 'string' || typeof error === 'number' || typeof error === 'boolean') {

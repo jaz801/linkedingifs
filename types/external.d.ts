@@ -72,28 +72,9 @@ declare module 'gif-encoder-2' {
     setQuality(quality: number): void;
     addFrame(frame: CanvasRenderingContext2D | SKRSContext2D | ImageData | Uint8Array | Buffer): void;
     finish(): void;
-  }
-}
-
-declare module '@pencil.js/canvas-gif-encoder' {
-  import type { CanvasRenderingContext2D } from 'canvas';
-  import type { SKRSContext2D } from '@napi-rs/canvas';
-
-  export default class CanvasGifEncoder {
-    constructor(width: number, height: number, options?: Record<string, unknown>);
-    start(): void;
-    finish(): void;
-    setRepeat(repeat: number): void;
-    setDelay(milliseconds: number): void;
-    setQuality(quality: number): void;
-    addFrame(
-      frame: CanvasRenderingContext2D | SKRSContext2D | ImageData | Uint8Array | Buffer,
-      delay?: number,
-    ): void;
-    readonly streamInfo: {
-      data?: Buffer | Uint8Array | number[] | string;
+    readonly out: {
+      getData(): Buffer;
     };
   }
 }
-
 

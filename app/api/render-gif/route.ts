@@ -11,21 +11,46 @@
 // With the encoder returning in-memory buffers only, the stream listeners never fired, so the handler crashed and the client could not download GIFs.
 // ✅ WHY THIS SOLUTION WAS PICKED (2025-11-08-G):
 // Refactored the encoder usage to the library’s buffer-based API and now return the binary payload directly from the route with explicit headers, keeping the render pipeline unchanged otherwise.
+// 🔍 WHAT WAS WRONG (2025-11-09-A):
+// The dependency on `@pencil.js/canvas-gif-encoder` was never added to package.json, so production builds failed with “Module not found.”
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-09-A):
+// Without the encoder at runtime the route could not execute, blocking all GIF exports after the background animation update shipped.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-A):
+// Declared the dependency explicitly and wrapped the handler in structured logging so future crashes surface request metadata and error identifiers automatically.
+// 🔍 WHAT WAS WRONG (2025-11-09-B):
+// After switching to `@pencil.js/canvas-gif-encoder`, the handler still called legacy `gif-encoder` APIs (`setRepeat`, `setDelay`, `setQuality`, `finish`), causing every request to fail with “encoder.setRepeat is not a function.”
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-09-B):
+// The test harness and frontend could no longer export GIFs, blocking validation of rendering changes.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-B):
+// Updated the route to use the library’s builder-style workflow (per-frame delays via `addFrame` and `end()` for output) and convert the returned `Uint8Array` to a Buffer, restoring compatibility without reintroducing streaming complexity.
+// 🔍 WHAT WAS WRONG (2025-11-09-C):
+// `@pencil.js/canvas-gif-encoder` does not implement the legacy `setRepeat`/`setDelay`/`setQuality` API, so downstream code still invoking those methods crashed every request even after the handler refactor.
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-09-C):
+// Clients remained unable to download GIFs; the server continued to throw “encoder.setRepeat is not a function,” blocking validation and demos.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-C):
+// Switched the handler to `gif-encoder-2`, which supports the streaming-style API we rely on, and now collect the finished buffer directly from the encoder, restoring compatibility with existing rendering logic.
 
 // 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
 // 🧠 ERROR TYPE: Missing backend counterpart for frontend feature
 // 📂 FILE: app/api/render-gif/route.ts
-// 🧾 HISTORY: This issue has now occurred 1 time in this project.
+// 🧾 HISTORY: This issue has now occurred 2 times in this project.
 //   - #1 on 2025-11-08 [Handled by adding GIF rendering route]
+//   - #2 on 2025-11-09 [Resolved by switching server encoder to gif-encoder-2]
 // 🚨 Next steps:
 // Add regression tests that call the API route with sample payloads to ensure future refactors keep exports working.
 
 import { NextResponse } from 'next/server';
-import CanvasGifEncoder from '@pencil.js/canvas-gif-encoder';
+import { performance } from 'node:perf_hooks';
+import GIFEncoder from 'gif-encoder-2';
 import { createCanvas, loadImage } from 'canvas';
 import type { CanvasRenderingContext2D } from 'canvas';
 
 import type { RenderGifPayload, RenderLineInput, RenderObjectInput } from '@/lib/render/schema';
+import {
+  createServerEventId,
+  logServerMessage,
+  reportServerError,
+} from '@/lib/monitoring/serverLogger';
 
 export const runtime = 'nodejs';
 
@@ -34,12 +59,25 @@ export const runtime = 'nodejs';
  * this route lives inside the same dev server, so no separate backend process is required.
  */
 export async function POST(request: Request) {
+  const requestId = createServerEventId('render_gif');
+  const startedAt = performance.now();
+  let payloadSummary: Record<string, unknown> | null = null;
+
   try {
     const payload = (await request.json()) as RenderGifPayload;
 
     validatePayload(payload);
 
+    const summary = summarizePayload(payload);
+    payloadSummary = summary;
+
     const buffer = await renderGif(payload);
+
+    logServerMessage('info', 'render-gif:success', {
+      requestId,
+      durationMs: Number((performance.now() - startedAt).toFixed(2)),
+      ...summary,
+    });
 
     return new NextResponse(buffer, {
       status: 200,
@@ -51,10 +89,18 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    console.error('Failed to render GIF:', error);
+    const { errorId, message } = reportServerError(error, {
+      hint: 'render-gif:failure',
+      context: {
+        requestId,
+        payload: payloadSummary,
+      },
+    });
     return NextResponse.json(
       {
-        message: error instanceof Error ? error.message : 'Unable to render GIF at this time.',
+        message,
+        errorId,
+        requestId,
       },
       { status: 400 },
     );
@@ -95,11 +141,7 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
     throw new Error('Unable to acquire 2D rendering context.');
   }
 
-  const encoder = new CanvasGifEncoder(width, height);
-  encoder.setRepeat(0);
-  encoder.setDelay(delayMs);
-  encoder.setQuality(10);
-  encoder.start();
+  const encoder = createGifEncoder(width, height, totalFrames, delayMs);
 
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
     context.clearRect(0, 0, width, height);
@@ -108,39 +150,33 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
     drawLines(context, lines);
     drawObjects(context, objects, lines, frameIndex, totalFrames);
 
-    encoder.addFrame(context, delayMs);
+    encoder.addFrame(context);
   }
 
   encoder.finish();
 
-  return resolveEncoderBuffer(encoder);
+  return getEncoderBuffer(encoder);
 }
 
-function resolveEncoderBuffer(
-  encoder: CanvasGifEncoder & { streamInfo?: { data?: unknown } },
-): Buffer {
-  const data = encoder.streamInfo?.data;
-  if (!data) {
-    throw new Error('GIF encoder returned empty output.');
-  }
+function createGifEncoder(
+  width: number,
+  height: number,
+  totalFrames: number,
+  delayMs: number,
+): GIFEncoder & { out: { getData: () => Buffer } } {
+  const encoder = new GIFEncoder(
+    width,
+    height,
+    'neuquant',
+    false,
+    totalFrames,
+  ) as GIFEncoder & { out: { getData: () => Buffer } };
+  encoder.setRepeat(0);
+  encoder.setDelay(delayMs);
+  encoder.setQuality(10);
+  encoder.start();
 
-  if (Buffer.isBuffer(data)) {
-    return data;
-  }
-
-  if (data instanceof Uint8Array) {
-    return Buffer.from(data);
-  }
-
-  if (Array.isArray(data)) {
-    return Buffer.from(data);
-  }
-
-  if (typeof data === 'string') {
-    return Buffer.from(data, 'binary');
-  }
-
-  throw new Error('Unsupported GIF encoder output type.');
+  return encoder;
 }
 
 function sanitizeFps(fps: RenderGifPayload['fps']) {
@@ -275,5 +311,25 @@ function drawArrow(context: CanvasRenderingContext2D, size: number) {
   context.lineTo(half, 0);
   context.closePath();
   context.fill();
+}
+
+function summarizePayload(payload: RenderGifPayload) {
+  return {
+    width: payload.width,
+    height: payload.height,
+    duration: payload.duration,
+    fps: sanitizeFps(payload.fps),
+    lineCount: Array.isArray(payload.lines) ? payload.lines.length : 0,
+    objectCount: Array.isArray(payload.objects) ? payload.objects.length : 0,
+  };
+}
+
+function getEncoderBuffer(encoder: GIFEncoder & { out?: { getData?: () => Buffer } }) {
+  const data = encoder.out?.getData?.();
+  if (!data || data.length === 0) {
+    throw new Error('GIF encoder returned empty output.');
+  }
+
+  return data;
 }
 

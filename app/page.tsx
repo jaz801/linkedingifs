@@ -35,6 +35,12 @@
 // Without structured error reporting we had no signal when uploads, exports, or rendering failed, blocking backend triage.
 // ✅ WHY THIS SOLUTION WAS PICKED (2025-11-08-F):
 // Added a client-side reporter with global listeners and server logging so we can capture actionable diagnostics with minimal performance overhead.
+// 🔍 WHAT WAS WRONG (2025-11-09-A):
+// Backend failures returned only “Unable to render GIF,” giving support no way to trace issues or tie them to server logs.
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-09-A):
+// Without a reference ID, neither QA nor developers could match user reports to server-side traces, dragging out triage.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-A):
+// Expose the server-provided error ID in alerts and ship it alongside client telemetry so incidents can be correlated immediately.
 
 // 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
 // 🧠 ERROR TYPE: Shape state drift across UI layers
@@ -175,6 +181,47 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
     lines: renderLines,
     objects,
   };
+}
+
+function extractServerErrorMeta(error: unknown): { errorId: string | null; requestId: string | null } {
+  let errorId: string | null = null;
+  let requestId: string | null = null;
+
+  if (typeof error === 'object' && error !== null) {
+    if ('errorId' in error) {
+      const value = (error as { errorId?: unknown }).errorId;
+      if (typeof value === 'string' && value.trim().length > 0) {
+        errorId = value;
+      }
+    }
+
+    if ('requestId' in error) {
+      const value = (error as { requestId?: unknown }).requestId;
+      if (typeof value === 'string' && value.trim().length > 0) {
+        requestId = value;
+      }
+    }
+
+    if ('cause' in error) {
+      const cause = (error as { cause?: unknown }).cause;
+      if (typeof cause === 'object' && cause !== null) {
+        if (errorId === null && 'errorId' in cause) {
+          const value = (cause as { errorId?: unknown }).errorId;
+          if (typeof value === 'string' && value.trim().length > 0) {
+            errorId = value;
+          }
+        }
+        if (requestId === null && 'requestId' in cause) {
+          const value = (cause as { requestId?: unknown }).requestId;
+          if (typeof value === 'string' && value.trim().length > 0) {
+            requestId = value;
+          }
+        }
+      }
+    }
+  }
+
+  return { errorId, requestId };
 }
 
 async function convertDataUrlToPng(dataUrl: string, width: number, height: number) {
@@ -548,6 +595,8 @@ export default function Home() {
 
       await downloadGIF(payload);
     } catch (error) {
+      const { errorId, requestId } = extractServerErrorMeta(error);
+
       console.error('Failed to export GIF', error);
       reportClientError(error, {
         hint: 'handleRequestDownload',
@@ -555,9 +604,15 @@ export default function Home() {
           lineCount: lineSnapshot.length,
           canvasWidth: parsedCanvasWidth,
           canvasHeight: parsedCanvasHeight,
+          serverErrorId: errorId,
+          serverRequestId: requestId,
         },
       });
-      window.alert('Unable to export the GIF right now. Please try again.');
+
+      const alertMessage = errorId
+        ? `Unable to export the GIF right now. Reference ID: ${errorId}`
+        : 'Unable to export the GIF right now. Please try again.';
+      window.alert(alertMessage);
     } finally {
       setIsExporting(false);
     }

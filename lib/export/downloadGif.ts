@@ -1,5 +1,10 @@
 import type { RenderGifPayload } from '@/lib/render/schema';
 
+type RenderGifError = Error & {
+  status?: number;
+  errorId?: string | null;
+};
+
 export async function downloadGIF(animationData: RenderGifPayload) {
   const response = await fetch('/api/render-gif', {
     method: 'POST',
@@ -9,15 +14,37 @@ export async function downloadGIF(animationData: RenderGifPayload) {
 
   if (!response.ok) {
     let message = 'Failed to render GIF.';
+    let errorId: string | null = null;
+    let requestId: string | null = null;
+    let cause: unknown = null;
     try {
       const errorBody = await response.json();
+      cause = errorBody;
       if (typeof errorBody?.message === 'string') {
         message = errorBody.message;
+      }
+      if (typeof errorBody?.errorId === 'string') {
+        errorId = errorBody.errorId;
+      }
+      if (typeof errorBody?.requestId === 'string') {
+        requestId = errorBody.requestId;
       }
     } catch {
       // ignore parsing failure and bubble generic message
     }
-    throw new Error(message);
+
+    const error = new Error(message) as RenderGifError;
+    error.name = 'RenderGifError';
+    error.status = response.status;
+    error.errorId = errorId;
+    if (requestId) {
+      (error as Record<string, unknown>).requestId = requestId;
+    }
+    if (cause !== null) {
+      (error as Error & { cause?: unknown }).cause = cause;
+    }
+
+    throw error;
   }
 
   const blob = await response.blob();
