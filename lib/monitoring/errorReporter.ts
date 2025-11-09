@@ -13,11 +13,13 @@ function serializeError(error: unknown) {
       name: error.name,
     };
 
-    for (const key of Object.keys(error)) {
+    const extendedError = error as unknown as Record<string, unknown>;
+
+    for (const key of Object.keys(extendedError)) {
       if (key in base) {
         continue;
       }
-      base[key] = (error as Record<string, unknown>)[key];
+      base[key] = extendedError[key];
     }
 
     if ('cause' in error) {

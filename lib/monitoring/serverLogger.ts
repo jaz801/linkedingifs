@@ -71,7 +71,7 @@ export function reportServerError(
 
   return {
     errorId,
-    message: serializedError.message ?? 'Unexpected server error.',
+    message: extractErrorMessage(serializedError),
   };
 }
 
@@ -82,12 +82,13 @@ function serializeUnknownError(error: unknown): Record<string, unknown> {
       message: error.message,
       stack: error.stack,
     };
+    const errorWithProps = error as Error & Record<string, unknown>;
 
-    for (const key of Object.keys(error)) {
+    for (const key of Object.keys(errorWithProps)) {
       if (key in base) {
         continue;
       }
-      base[key] = (error as Record<string, unknown>)[key];
+      base[key] = errorWithProps[key];
     }
 
     if ('cause' in error) {
@@ -152,5 +153,28 @@ function normalizeCause(cause: unknown) {
   }
 
   return cause;
+}
+
+function extractErrorMessage(serializedError: Record<string, unknown>): string {
+  const rawMessage = serializedError.message;
+
+  if (typeof rawMessage === 'string') {
+    const trimmed = rawMessage.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+
+  if (typeof rawMessage === 'number' || typeof rawMessage === 'boolean') {
+    return String(rawMessage);
+  }
+
+  const name = serializedError.name;
+
+  if (typeof name === 'string' && name.trim().length > 0) {
+    return `${name}: Unexpected server error.`;
+  }
+
+  return 'Unexpected server error.';
 }
 
