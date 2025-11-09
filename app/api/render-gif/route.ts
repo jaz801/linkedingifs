@@ -72,6 +72,7 @@ export async function POST(request: Request) {
     payloadSummary = summary;
 
     const buffer = await renderGif(payload);
+    const responseBody = toArrayBuffer(buffer);
 
     logServerMessage('info', 'render-gif:success', {
       requestId,
@@ -79,13 +80,13 @@ export async function POST(request: Request) {
       ...summary,
     });
 
-    return new NextResponse(buffer, {
+    return new NextResponse(responseBody, {
       status: 200,
       headers: {
         'Content-Type': 'image/gif',
         'Content-Disposition': 'attachment; filename="animation.gif"',
         'Cache-Control': 'no-store',
-        'Content-Length': buffer.length.toString(),
+        'Content-Length': buffer.byteLength.toString(),
       },
     });
   } catch (error) {
@@ -331,5 +332,9 @@ function getEncoderBuffer(encoder: GIFEncoder & { out?: { getData?: () => Buffer
   }
 
   return data;
+}
+
+function toArrayBuffer(buffer: Buffer) {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 

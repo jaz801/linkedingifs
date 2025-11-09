@@ -60,22 +60,16 @@ import { ShapeControls } from '@/components/ShapeControls';
 import { ToolSelector } from '@/components/ToolSelector';
 import { useLinesManager } from '@/hooks/useLinesManager';
 import type { LineSegment, LineShapeType } from '@/lib/canvas/types';
-import { renderPdfPageToDataUrl } from '@/lib/pdf/renderPdfPageToDataUrl';
 import { downloadGIF } from '@/lib/export/downloadGif';
 import { bindGlobalErrorListeners, reportClientError } from '@/lib/monitoring/errorReporter';
 import type { RenderGifPayload, RenderObjectInput } from '@/lib/render/schema';
 
-type CanvasBackground =
-  | {
-      kind: 'image';
-      src: string;
-    }
-  | {
-      kind: 'pdf-image';
-      src: string;
-    };
+type CanvasBackground = {
+  kind: 'image';
+  src: string;
+};
 
-const supportedImageMimeTypes = new Set(['image/jpeg', 'image/png']);
+const supportedImageMimeTypes = new Set(['image/png']);
 
 const DEFAULT_EXPORT_DURATION_SECONDS = 2.8;
 const DEFAULT_EXPORT_FPS = 30;
@@ -224,6 +218,15 @@ function extractServerErrorMeta(error: unknown): { errorId: string | null; reque
   return { errorId, requestId };
 }
 
+function buildExportFilename(input: string): string {
+  const trimmed = input.trim();
+  const withoutIllegalChars = trimmed.replace(/[\\/:*?"<>|]/g, '');
+  const collapsedWhitespace = withoutIllegalChars.replace(/\s+/g, '-');
+  const withoutTrailingDots = collapsedWhitespace.replace(/\.+$/, '');
+  const base = withoutTrailingDots.length > 0 ? withoutTrailingDots : 'animation';
+  return base.toLowerCase().endsWith('.gif') ? base : `${base}.gif`;
+}
+
 async function convertDataUrlToPng(dataUrl: string, width: number, height: number) {
   const image = await loadImageElement(dataUrl);
   const canvas = document.createElement('canvas');
@@ -290,6 +293,9 @@ export default function Home() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [canvasBackground, setCanvasBackground] = useState<CanvasBackground | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportFilename, setExportFilename] = useState('animation');
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const uploadNoticeTimeoutRef = useRef<number | null>(null);
 
   const {
     drawingSurfaceRef,
@@ -325,6 +331,15 @@ export default function Home() {
   useEffect(() => {
     const removeListeners = bindGlobalErrorListeners();
     return () => removeListeners?.();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (uploadNoticeTimeoutRef.current !== null) {
+        window.clearTimeout(uploadNoticeTimeoutRef.current);
+        uploadNoticeTimeoutRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -524,7 +539,20 @@ export default function Home() {
     updateSelectedLineProperties({ animateShapes: nextValue });
   };
 
+  const showUploadNotice = useCallback((message: string) => {
+    if (uploadNoticeTimeoutRef.current !== null) {
+      window.clearTimeout(uploadNoticeTimeoutRef.current);
+    }
+
+    setUploadNotice(message);
+    uploadNoticeTimeoutRef.current = window.setTimeout(() => {
+      setUploadNotice(null);
+      uploadNoticeTimeoutRef.current = null;
+    }, 3200);
+  }, []);
+
   const handleRequestUpload = () => {
+    showUploadNotice('Background uploads currently accept PNG images.');
     uploadInputRef.current?.click();
   };
 
@@ -537,18 +565,11 @@ export default function Home() {
     }
 
     try {
-      if (file.type === 'application/pdf') {
-        const arrayBuffer = await file.arrayBuffer();
-        const rasterized = await renderPdfPageToDataUrl({
-          data: arrayBuffer,
-          targetWidth: parsedCanvasWidth,
-          targetHeight: parsedCanvasHeight,
-        });
-        setCanvasBackground({ kind: 'pdf-image', src: rasterized });
-      } else if (supportedImageMimeTypes.has(file.type)) {
+      if (supportedImageMimeTypes.has(file.type)) {
         const dataUrl = await readFileAsDataUrl(file);
         setCanvasBackground({ kind: 'image', src: dataUrl });
       } else {
+        showUploadNotice('Only PNG backgrounds are supported right now.');
         setCanvasBackground(null);
       }
     } catch (error) {
@@ -565,6 +586,10 @@ export default function Home() {
     } finally {
       input.value = '';
     }
+  };
+
+  const handleExportFilenameChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setExportFilename(event.target.value);
   };
 
   const handleRequestDownload = useCallback(async () => {
@@ -593,7 +618,8 @@ export default function Home() {
         lines: lineSnapshot,
       });
 
-      await downloadGIF(payload);
+      const filename = buildExportFilename(exportFilename);
+      await downloadGIF(payload, { filename });
     } catch (error) {
       const { errorId, requestId } = extractServerErrorMeta(error);
 
@@ -616,7 +642,7 @@ export default function Home() {
     } finally {
       setIsExporting(false);
     }
-  }, [canvasBackground, isExporting, lines, parsedCanvasHeight, parsedCanvasWidth]);
+  }, [canvasBackground, exportFilename, isExporting, lines, parsedCanvasHeight, parsedCanvasWidth]);
 
   return (
     <div className="flex min-h-screen flex-col bg-stone-950 font-sans text-white">
@@ -679,12 +705,15 @@ export default function Home() {
           onRequestUpload={handleRequestUpload}
           onRequestDownload={handleRequestDownload}
           isDownloadInProgress={isExporting}
+          exportFilename={exportFilename}
+          onExportFilenameChange={handleExportFilenameChange}
+          uploadNotice={uploadNotice}
         />
       </main>
       <input
         ref={uploadInputRef}
         type="file"
-        accept=".jpg,.jpeg,.png,.pdf"
+        accept=".png"
         className="sr-only"
         onChange={handleBackgroundUpload}
       />

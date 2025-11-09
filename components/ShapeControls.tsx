@@ -36,6 +36,9 @@ type ShapeControlsProps = {
   onRequestUpload: () => void;
   onRequestDownload: () => void;
   isDownloadInProgress: boolean;
+  exportFilename: string;
+  onExportFilenameChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  uploadNotice: string | null;
 };
 
 const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
@@ -69,6 +72,9 @@ export function ShapeControls({
   onRequestUpload,
   onRequestDownload,
   isDownloadInProgress,
+  exportFilename,
+  onExportFilenameChange,
+  uploadNotice,
 }: ShapeControlsProps) {
   const formattedObjectColor = useMemo(
     () => color.replace('#', '').toUpperCase(),
@@ -301,6 +307,18 @@ export function ShapeControls({
       <section className="flex flex-col gap-2.5 border-t border-white/10 pt-4">
         <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">Export</span>
         <p className="text-[11px] text-white/60">Save to your GIF library or download locally.</p>
+        <label className="flex w-full flex-col gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">File Name</span>
+          <input
+            type="text"
+            value={exportFilename}
+            onChange={onExportFilenameChange}
+            placeholder="animation"
+            className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-medium text-white outline-none transition placeholder:text-white/30 focus:border-white/40 focus:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            spellCheck={false}
+            disabled={isDownloadInProgress}
+          />
+        </label>
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
@@ -322,7 +340,29 @@ export function ShapeControls({
             {isDownloadInProgress ? 'Preparing…' : 'Download'}
           </button>
         </div>
-        <p className="text-[11px] text-white/40">Supports JPG, PNG, or PDF backgrounds.</p>
+        {isDownloadInProgress ? (
+          <div
+            className="flex w-full flex-col gap-1.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="flex items-center justify-between text-[11px] text-white/60">
+              <span>Rendering GIF…</span>
+              <span className="animate-pulse text-white/80">Working</span>
+            </div>
+            <progress className="h-1.5 w-full overflow-hidden rounded-full accent-white" />
+          </div>
+        ) : null}
+        {uploadNotice ? (
+          <p
+            className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] font-medium text-amber-100/90"
+            role="status"
+            aria-live="polite"
+          >
+            {uploadNotice}
+          </p>
+        ) : null}
+        <p className="text-[11px] text-white/40">Supports PNG backgrounds only.</p>
       </section>
     </aside>
   );

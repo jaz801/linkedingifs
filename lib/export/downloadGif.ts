@@ -5,7 +5,11 @@ type RenderGifError = Error & {
   errorId?: string | null;
 };
 
-export async function downloadGIF(animationData: RenderGifPayload) {
+type DownloadGifOptions = {
+  filename?: string;
+};
+
+export async function downloadGIF(animationData: RenderGifPayload, options: DownloadGifOptions = {}) {
   const response = await fetch('/api/render-gif', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -49,11 +53,12 @@ export async function downloadGIF(animationData: RenderGifPayload) {
 
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
+  const filename = options.filename?.trim().length ? options.filename.trim() : 'animation.gif';
 
   try {
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = 'animation.gif';
+    anchor.download = filename;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
