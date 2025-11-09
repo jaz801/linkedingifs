@@ -1,3 +1,4 @@
+// Bugfix (2025-11-09-F): provide the required options argument to `PureImage.make` so TypeScript accepts the call signature.
 // Bugfix: pureimage lacks decodePNGFromBuffer export, so load images via stream decoding.
 import * as PureImage from 'pureimage';
 import { Readable } from 'node:stream';
@@ -31,6 +32,7 @@ function createPureImageCanvas(width: number, height: number): PureImageCanvas {
   return PureImage.make(
     Math.max(0, Math.floor(width)),
     Math.max(0, Math.floor(height)),
+    {},
   );
 }
 

@@ -35,6 +35,12 @@
 // Production deploys cannot progress while the compiler rejects the route, and the mismatch will reappear every time we run `next build`.
 // ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-D):
 // Narrowed the `addFrame` input to the encoder’s actual parameter type and cast the Node-canvas image data accordingly, unblocking builds without altering rendering logic.
+// 🔍 WHAT WAS WRONG (2025-11-09-E):
+// Our polyfilled canvas context declared the `arc` signature with an explicit `counterclockwise` flag, but the helper omitted it, so `next build` failed with “Expected 6 arguments.”
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-09-E):
+// The GIF renderer is part of the production build; the compiler error blocked deploys entirely.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-E):
+// Passed `false` for the optional flag to match the type definition without altering runtime behaviour.
 
 // 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
 // 🧠 ERROR TYPE: Missing backend counterpart for frontend feature
@@ -377,7 +383,7 @@ function normalizeProgress(value: number) {
 function drawDot(context: Canvas2DContext, size: number) {
   const radius = size / 2;
   context.beginPath();
-  context.arc(0, 0, radius, 0, Math.PI * 2);
+  context.arc(0, 0, radius, 0, Math.PI * 2, false);
   context.fill();
 }
 
