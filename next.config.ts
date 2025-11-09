@@ -1,7 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  experimental: {
+    turbo: {
+      externalPackages: ['@napi-rs/canvas', 'canvas', 'gif-encoder-2'],
+    },
+  },
 };
 
 export default nextConfig;

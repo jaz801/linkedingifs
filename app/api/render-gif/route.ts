@@ -48,7 +48,6 @@
 import { NextResponse } from 'next/server';
 import { performance } from 'node:perf_hooks';
 import GIFEncoder from 'gif-encoder-2';
-import { createCanvas, loadImage } from 'canvas';
 import type { CanvasRenderingContext2D } from 'canvas';
 
 import type { RenderGifPayload, RenderLineInput, RenderObjectInput } from '@/lib/render/schema';
@@ -57,6 +56,7 @@ import {
   logServerMessage,
   reportServerError,
 } from '@/lib/monitoring/serverLogger';
+import { getCanvasModule } from '@/lib/canvas/server';
 
 export const runtime = 'nodejs';
 
@@ -141,6 +141,9 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
   const totalFrames = Math.max(1, Math.round(duration * fps));
   const delayMs = Math.max(1, Math.round(1000 / fps));
 
+  const canvasBindings = loadCanvasBindings();
+  const { createCanvas, loadImage } = canvasBindings;
+
   const backgroundImage = await loadImage(background);
   const canvas = createCanvas(width, height);
   const context = canvas.getContext('2d');
@@ -164,6 +167,25 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
   encoder.finish();
 
   return getEncoderBuffer(encoder);
+}
+
+function loadCanvasBindings() {
+  try {
+    return getCanvasModule();
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message
+        ? `Unable to initialize canvas bindings: ${error.message}`
+        : 'Unable to initialize canvas bindings.';
+
+    if (error instanceof Error) {
+      const enhancedError = new Error(message);
+      (enhancedError as Error & { cause?: unknown }).cause = error;
+      throw enhancedError;
+    }
+
+    throw new Error(message);
+  }
 }
 
 function createGifEncoder(
