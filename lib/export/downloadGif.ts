@@ -2,7 +2,9 @@ import type { RenderGifPayload } from '@/lib/render/schema';
 
 type RenderGifError = Error & {
   status?: number;
-  errorId?: string | null;
+  errorId?: string;
+  requestId?: string;
+  cause?: unknown;
 };
 
 type DownloadGifOptions = {
@@ -18,9 +20,9 @@ export async function downloadGIF(animationData: RenderGifPayload, options: Down
 
   if (!response.ok) {
     let message = 'Failed to render GIF.';
-    let errorId: string | null = null;
-    let requestId: string | null = null;
-    let cause: unknown = null;
+    let errorId: string | undefined;
+    let requestId: string | undefined;
+    let cause: unknown | undefined;
     try {
       const errorBody = await response.json();
       cause = errorBody;
@@ -42,10 +44,10 @@ export async function downloadGIF(animationData: RenderGifPayload, options: Down
     error.status = response.status;
     error.errorId = errorId;
     if (requestId) {
-      (error as Record<string, unknown>).requestId = requestId;
+      error.requestId = requestId;
     }
-    if (cause !== null) {
-      (error as Error & { cause?: unknown }).cause = cause;
+    if (cause !== undefined) {
+      error.cause = cause;
     }
 
     throw error;

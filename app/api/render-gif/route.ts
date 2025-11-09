@@ -29,6 +29,12 @@
 // Clients remained unable to download GIFs; the server continued to throw “encoder.setRepeat is not a function,” blocking validation and demos.
 // ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-C):
 // Switched the handler to `gif-encoder-2`, which supports the streaming-style API we rely on, and now collect the finished buffer directly from the encoder, restoring compatibility with existing rendering logic.
+// 🔍 WHAT WAS WRONG (2025-11-09-D):
+// TypeScript compared the DOM `ImageData` type (with a required `colorSpace` field) to the `canvas` package’s `ImageData`, so the build crashed even though runtime behaviour was correct.
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-09-D):
+// Production deploys cannot progress while the compiler rejects the route, and the mismatch will reappear every time we run `next build`.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-D):
+// Narrowed the `addFrame` input to the encoder’s actual parameter type and cast the Node-canvas image data accordingly, unblocking builds without altering rendering logic.
 
 // 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
 // 🧠 ERROR TYPE: Missing backend counterpart for frontend feature
@@ -108,6 +114,8 @@ export async function POST(request: Request) {
   }
 }
 
+type GifEncoderFrameInput = Parameters<GIFEncoder['addFrame']>[0];
+
 function validatePayload(payload: RenderGifPayload) {
   if (!payload || typeof payload !== 'object') {
     throw new Error('Invalid render payload.');
@@ -152,7 +160,7 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
     drawObjects(context, objects, lines, frameIndex, totalFrames);
 
     const frame = context.getImageData(0, 0, width, height);
-    encoder.addFrame(frame);
+    encoder.addFrame(frame as unknown as GifEncoderFrameInput);
   }
 
   encoder.finish();
@@ -336,6 +344,9 @@ function getEncoderBuffer(encoder: GIFEncoder & { out?: { getData?: () => Buffer
 }
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
-  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  return buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength,
+  ) as ArrayBuffer;
 }
 
