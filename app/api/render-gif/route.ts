@@ -151,7 +151,8 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
     drawLines(context, lines);
     drawObjects(context, objects, lines, frameIndex, totalFrames);
 
-    encoder.addFrame(context);
+    const frame = context.getImageData(0, 0, width, height);
+    encoder.addFrame(frame);
   }
 
   encoder.finish();
