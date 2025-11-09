@@ -1,4 +1,4 @@
-import type { SKRSContext2D } from '@napi-rs/canvas';
+import type { CanvasLikeContext } from './canvasContext';
 
 export type DrawableObject = {
   type: 'dot' | 'cube' | 'arrow';
@@ -10,9 +10,7 @@ export type DrawableObject = {
   opacity?: number;
 };
 
-type DrawingContext = CanvasRenderingContext2D | SKRSContext2D;
-
-export function drawObject(ctx: DrawingContext, object: DrawableObject) {
+export function drawObject(ctx: CanvasLikeContext, object: DrawableObject) {
   if (object.size <= 0) {
     return;
   }
@@ -46,7 +44,7 @@ export function drawObject(ctx: DrawingContext, object: DrawableObject) {
   }
 }
 
-function drawDot(ctx: DrawingContext, x: number, y: number, size: number, color: string) {
+function drawDot(ctx: CanvasLikeContext, x: number, y: number, size: number, color: string) {
   ctx.save();
   try {
     ctx.beginPath();
@@ -58,7 +56,7 @@ function drawDot(ctx: DrawingContext, x: number, y: number, size: number, color:
   }
 }
 
-function drawCube(ctx: DrawingContext, x: number, y: number, size: number, color: string) {
+function drawCube(ctx: CanvasLikeContext, x: number, y: number, size: number, color: string) {
   ctx.save();
   try {
     const half = size / 2;
@@ -70,7 +68,7 @@ function drawCube(ctx: DrawingContext, x: number, y: number, size: number, color
 }
 
 function drawArrow(
-  ctx: DrawingContext,
+  ctx: CanvasLikeContext,
   x: number,
   y: number,
   size: number,
@@ -89,7 +87,9 @@ function drawArrow(
 
     ctx.strokeStyle = color;
     ctx.lineWidth = shaftWidth;
-    ctx.lineCap = 'round';
+    if ('lineCap' in ctx && ctx.lineCap !== undefined) {
+      ctx.lineCap = 'round';
+    }
 
     ctx.beginPath();
     ctx.moveTo(-shaftLength / 2, 0);

@@ -1,4 +1,4 @@
-import type { SKRSContext2D } from '@napi-rs/canvas';
+import type { CanvasLikeContext } from './canvasContext';
 
 export type LinePath = {
   x1: number;
@@ -12,14 +12,14 @@ export type StaticLine = LinePath & {
   strokeWidth: number;
 };
 
-type DrawingContext = CanvasRenderingContext2D | SKRSContext2D;
-
-export function drawLine(ctx: DrawingContext, line: StaticLine) {
+export function drawLine(ctx: CanvasLikeContext, line: StaticLine) {
   ctx.save();
   try {
     ctx.strokeStyle = line.strokeColor;
     ctx.lineWidth = line.strokeWidth;
-    ctx.lineCap = 'round';
+    if ('lineCap' in ctx && ctx.lineCap !== undefined) {
+      ctx.lineCap = 'round';
+    }
 
     ctx.beginPath();
     ctx.moveTo(line.x1, line.y1);

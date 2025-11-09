@@ -1,7 +1,6 @@
+// Bugfix: remove Tailwind plugin because utilities are now handcrafted in CSS.
 const config = {
-  plugins: {
-    "@tailwindcss/postcss": {},
-  },
+  plugins: [],
 };
 
 export default config;

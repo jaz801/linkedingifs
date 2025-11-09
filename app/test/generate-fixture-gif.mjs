@@ -11,7 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createCanvas } from 'canvas';
+import * as PureImage from 'pureimage';
 
 const DEFAULT_API_URL = 'http://localhost:3000/api/render-gif';
 const API_URL = process.env.RENDER_GIF_URL ?? DEFAULT_API_URL;
@@ -28,12 +28,13 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const DEV_SERVER_START_TIMEOUT_MS = 60_000;
 const DEV_SERVER_POLL_INTERVAL_MS = 500;
 
-function createFallbackBackgroundDataUrl() {
-  const canvas = createCanvas(WIDTH, HEIGHT);
+async function createFallbackBackgroundDataUrl() {
+  const canvas = PureImage.make(WIDTH, HEIGHT);
   const context = canvas.getContext('2d');
   context.fillStyle = '#0C0A09';
   context.fillRect(0, 0, WIDTH, HEIGHT);
-  return canvas.toDataURL('image/png');
+  const buffer = await PureImage.encodePNGToBuffer(canvas);
+  return `data:image/png;base64,${buffer.toString('base64')}`;
 }
 
 async function loadBackgroundDataUrl() {

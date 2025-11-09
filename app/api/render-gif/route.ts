@@ -47,8 +47,7 @@
 
 import { NextResponse } from 'next/server';
 import { performance } from 'node:perf_hooks';
-import GIFEncoder from 'gif-encoder-2';
-import type { CanvasRenderingContext2D } from 'canvas';
+import GIFEncoder from 'gifencoder';
 
 import type { RenderGifPayload, RenderLineInput, RenderObjectInput } from '@/lib/render/schema';
 import {
@@ -57,8 +56,15 @@ import {
   reportServerError,
 } from '@/lib/monitoring/serverLogger';
 import { getCanvasModule } from '@/lib/canvas/server';
+import type { CanvasLikeContext } from '@/lib/render/canvasContext';
 
 export const runtime = 'nodejs';
+
+type CanvasFactory = ReturnType<typeof getCanvasModule>['createCanvas'];
+type CanvasInstance = ReturnType<CanvasFactory>;
+type Canvas2DContext = CanvasInstance extends { getContext(type: '2d'): infer C }
+  ? C
+  : CanvasLikeContext;
 
 /**
  * Next.js runs the frontend and backend together when you execute `npm run dev`;
@@ -146,16 +152,13 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
 
   const backgroundImage = await loadImage(background);
   const canvas = createCanvas(width, height);
-  const context = canvas.getContext('2d');
-  if (!context) {
-    throw new Error('Unable to acquire 2D rendering context.');
-  }
+  const context = getContext2d(canvas);
 
-  const encoder = createGifEncoder(width, height, totalFrames, delayMs);
+  const { encoder, completion } = createGifEncoder(width, height, delayMs);
 
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
-    context.clearRect(0, 0, width, height);
-    context.drawImage(backgroundImage, 0, 0, width, height);
+    clearFrame(context, width, height);
+    drawBackground(context, backgroundImage, width, height);
 
     drawLines(context, lines);
     drawObjects(context, objects, lines, frameIndex, totalFrames);
@@ -166,7 +169,7 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
 
   encoder.finish();
 
-  return getEncoderBuffer(encoder);
+  return completion;
 }
 
 function loadCanvasBindings() {
@@ -191,22 +194,70 @@ function loadCanvasBindings() {
 function createGifEncoder(
   width: number,
   height: number,
-  totalFrames: number,
   delayMs: number,
-): GIFEncoder & { out: { getData: () => Buffer } } {
-  const encoder = new GIFEncoder(
-    width,
-    height,
-    'neuquant',
-    false,
-    totalFrames,
-  ) as GIFEncoder & { out: { getData: () => Buffer } };
+) {
+  const encoder = new GIFEncoder(width, height);
+  const chunks: Buffer[] = [];
+  let resolveCompletion: ((buffer: Buffer) => void) | null = null;
+  let rejectCompletion: ((error: unknown) => void) | null = null;
+
+  const completion = new Promise<Buffer>((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+
+  const stream = encoder.createReadStream();
+  stream.on('data', (chunk: Buffer) => {
+    chunks.push(chunk);
+  });
+  stream.once('error', (error) => {
+    if (rejectCompletion) {
+      rejectCompletion(error);
+      rejectCompletion = null;
+      resolveCompletion = null;
+    }
+  });
+  stream.once('end', () => {
+    if (resolveCompletion) {
+      resolveCompletion(Buffer.concat(chunks));
+      resolveCompletion = null;
+      rejectCompletion = null;
+    }
+  });
+
   encoder.setRepeat(0);
   encoder.setDelay(delayMs);
   encoder.setQuality(10);
   encoder.start();
 
-  return encoder;
+  return { encoder, completion };
+}
+
+function clearFrame(context: Canvas2DContext, width: number, height: number) {
+  if (typeof (context as { clearRect?: unknown }).clearRect === 'function') {
+    (context as { clearRect: (x: number, y: number, w: number, h: number) => void }).clearRect(0, 0, width, height);
+  }
+}
+
+function drawBackground(
+  context: Canvas2DContext,
+  image: { width: number; height: number },
+  width: number,
+  height: number,
+) {
+  if (typeof (context as { drawImage?: unknown }).drawImage !== 'function') {
+    return;
+  }
+
+  const drawImage = (context as {
+    drawImage: (img: unknown, dx: number, dy: number, dw?: number, dh?: number) => void;
+  }).drawImage;
+
+  if (drawImage.length >= 5) {
+    drawImage.call(context, image, 0, 0, width, height);
+  } else {
+    drawImage.call(context, image, 0, 0);
+  }
 }
 
 function sanitizeFps(fps: RenderGifPayload['fps']) {
@@ -222,7 +273,7 @@ function sanitizeFps(fps: RenderGifPayload['fps']) {
   return Math.min(60, Math.max(1, Math.round(parsed)));
 }
 
-function drawLines(context: CanvasRenderingContext2D, lines: RenderLineInput[]) {
+function drawLines(context: Canvas2DContext, lines: RenderLineInput[]) {
   if (!Array.isArray(lines)) {
     return;
   }
@@ -234,14 +285,16 @@ function drawLines(context: CanvasRenderingContext2D, lines: RenderLineInput[]) 
     context.lineTo(line.x2, line.y2);
     context.strokeStyle = line.strokeColor ?? '#FFFFFF';
     context.lineWidth = Math.max(1, line.strokeWidth ?? 1);
-    context.lineCap = 'round';
+    if ('lineCap' in context) {
+      (context as Canvas2DContext & { lineCap: unknown }).lineCap = 'round';
+    }
     context.stroke();
     context.restore();
   });
 }
 
 function drawObjects(
-  context: CanvasRenderingContext2D,
+  context: Canvas2DContext,
   objects: RenderObjectInput[],
   lines: RenderLineInput[],
   frameIndex: number,
@@ -321,19 +374,19 @@ function normalizeProgress(value: number) {
   return wrapped < 0 ? wrapped + 1 : wrapped;
 }
 
-function drawDot(context: CanvasRenderingContext2D, size: number) {
+function drawDot(context: Canvas2DContext, size: number) {
   const radius = size / 2;
   context.beginPath();
   context.arc(0, 0, radius, 0, Math.PI * 2);
   context.fill();
 }
 
-function drawCube(context: CanvasRenderingContext2D, size: number) {
+function drawCube(context: Canvas2DContext, size: number) {
   const half = size / 2;
   context.fillRect(-half, -half, size, size);
 }
 
-function drawArrow(context: CanvasRenderingContext2D, size: number) {
+function drawArrow(context: Canvas2DContext, size: number) {
   const half = size / 2;
   context.beginPath();
   context.moveTo(-half, half);
@@ -354,19 +407,18 @@ function summarizePayload(payload: RenderGifPayload) {
   };
 }
 
-function getEncoderBuffer(encoder: GIFEncoder & { out?: { getData?: () => Buffer } }) {
-  const data = encoder.out?.getData?.();
-  if (!data || data.length === 0) {
-    throw new Error('GIF encoder returned empty output.');
-  }
-
-  return data;
-}
-
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
   return buffer.buffer.slice(
     buffer.byteOffset,
     buffer.byteOffset + buffer.byteLength,
   ) as ArrayBuffer;
+}
+
+function getContext2d(canvas: CanvasInstance): Canvas2DContext {
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Unable to acquire 2D rendering context.');
+  }
+  return context as Canvas2DContext;
 }
 

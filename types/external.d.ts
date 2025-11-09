@@ -53,28 +53,18 @@ declare module 'pdfjs-dist/legacy/build/pdf.worker?url' {
   export default url;
 }
 
-declare module 'gif-encoder-2' {
+declare module 'gifencoder' {
   import type { Readable } from 'stream';
-  import type { SKRSContext2D } from '@napi-rs/canvas';
 
   export default class GIFEncoder {
-    constructor(
-      width: number,
-      height: number,
-      algorithm?: 'neuquant' | 'octree',
-      useOptimizer?: boolean,
-      totalFrames?: number,
-    );
+    constructor(width: number, height: number);
     createReadStream(stream?: Readable): Readable;
     start(): void;
     setRepeat(repeat: number): void;
     setDelay(milliseconds: number): void;
     setQuality(quality: number): void;
-    addFrame(frame: CanvasRenderingContext2D | SKRSContext2D | ImageData | Uint8Array | Buffer): void;
+    addFrame(frame: CanvasRenderingContext2D | ImageData | Uint8Array | Buffer | number[]): void;
     finish(): void;
-    readonly out: {
-      getData(): Buffer;
-    };
   }
 }
 
