@@ -1,5 +1,20 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-10-A]
+// 🔍 WHAT WAS WRONG:
+// The Delete/Backspace keyboard shortcut always removed the active line, even when the user was typing inside form inputs such as the export filename.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers lost their most recent line right before exporting because editing text fields triggered the deletion handler.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// The key listener now ignores Delete/Backspace events that originate from editable controls or when modifier keys are held, preserving line state during text edits.
+// 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
+// 🧠 ERROR TYPE: Unscoped keyboard shortcut
+// 📂 FILE: hooks/useLinesManager.ts
+// 🧾 HISTORY: This issue has now occurred 1 time in this project.
+//   - #1 on 2025-11-10 [Guard Delete/Backspace handler against firing inside editable inputs]
+// 🚨 Next steps:
+// Audit other global shortcuts to ensure they respect focused form elements.
+
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -324,8 +339,39 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
   useEffect(() => {
     if (!selectedLineId) return;
 
+    const isEditableElement = (element: EventTarget | null): element is HTMLElement => {
+      if (!element || !(element instanceof HTMLElement)) {
+        return false;
+      }
+
+      if (element.isContentEditable) {
+        return true;
+      }
+
+      const tagName = element.tagName;
+      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') {
+        return true;
+      }
+
+      const role = element.getAttribute('role');
+      return role === 'textbox' || role === 'combobox' || role === 'spinbutton';
+    };
+
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+      if (event.key !== 'Delete' && event.key !== 'Backspace') {
+        return;
+      }
+
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+
+      const { target } = event;
+      const activeElement = document.activeElement;
+
+      if (isEditableElement(target) || isEditableElement(activeElement)) {
+        return;
+      }
 
       setLines((prev) => prev.filter((line) => line.id !== selectedLineId));
       setSelectedLineId(null);
