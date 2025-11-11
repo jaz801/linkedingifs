@@ -1,5 +1,19 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-I]
+// 🔍 WHAT WAS WRONG:
+// The progress bar hit 100% as soon as encoding finished, but the browser still needed a few seconds to download the GIF, leaving users staring at “Wrapping up…”.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// If the bar completes before the file saves, designers can’t trust the ETA and may retry exports unnecessarily.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Stream download progress from the client, blend it with measured render timings, and map the loading bar to the entire request so it finishes exactly when the file is ready.
+// 🛠️ EDIT LOG [2025-11-11-H]
+// 🔍 WHAT WAS WRONG:
+// The download button flipped to an indeterminate spinner during exports, so users had no clue if renders were still working or how long to wait.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without a determinate progress bar and ETA the workflow felt unreliable, especially when heavy scenes took several seconds to encode.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Track recent render durations, start an animated progress timer when exports begin, and update it with server-reported timings so the UI can show a real loading bar and countdown.
 // 🛠️ EDIT LOG [2025-11-11-G]
 // 🔍 WHAT WAS WRONG:
 // Export snapshots still shared references to line control points, so post-export edits bent both the saved payload and the live canvas.
@@ -111,6 +125,7 @@ import { ToolSelector } from '@/components/ToolSelector';
 import { useLinesManager } from '@/hooks/useLinesManager';
 import type { LineEndCap, LineSegment, LineShapeType } from '@/lib/canvas/types';
 import { downloadGIF } from '@/lib/export/downloadGif';
+import type { DownloadGifProgressUpdate } from '@/lib/export/downloadGif';
 import { bindGlobalErrorListeners, reportClientError } from '@/lib/monitoring/errorReporter';
 import type { RenderGifPayload, RenderObjectInput } from '@/lib/render/schema';
 
@@ -369,6 +384,19 @@ export default function Home() {
   const [exportFilename, setExportFilename] = useState('animation');
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const uploadNoticeTimeoutRef = useRef<number | null>(null);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [renderEtaSeconds, setRenderEtaSeconds] = useState<number | null>(null);
+  const renderProgressTimerRef = useRef<number | null>(null);
+  const renderProgressSettledTimeoutRef = useRef<number | null>(null);
+  const renderProgressStartRef = useRef<number>(0);
+  const lastRenderDurationRef = useRef<number>(4000);
+  const renderProgressEstimateRef = useRef<number>(4000);
+  const renderProgressModeRef = useRef<'idle' | 'processing' | 'transfer' | 'completed'>('idle');
+  const transferBaseProgressRef = useRef<number>(0);
+  const transferTotalBytesRef = useRef<number | null>(null);
+  const transferStartedAtRef = useRef<number | null>(null);
+  const lastTransferDurationRef = useRef<number>(1200);
+  const currentProcessingMsRef = useRef<number | null>(null);
 
   const {
     drawingSurfaceRef,
@@ -420,6 +448,218 @@ export default function Home() {
       }
     };
   }, []);
+
+  const clearRenderProgressTimeout = useCallback(() => {
+    if (renderProgressSettledTimeoutRef.current !== null) {
+      window.clearTimeout(renderProgressSettledTimeoutRef.current);
+      renderProgressSettledTimeoutRef.current = null;
+    }
+  }, []);
+
+  const stopRenderProgressInterval = useCallback(() => {
+    if (renderProgressTimerRef.current !== null) {
+      window.clearInterval(renderProgressTimerRef.current);
+      renderProgressTimerRef.current = null;
+    }
+  }, []);
+
+  const startRenderProgress = useCallback(
+    (estimatedMs: number) => {
+      const fallbackMs = Number.isFinite(estimatedMs) && estimatedMs > 0 ? estimatedMs : 4000;
+      const clampedEstimate = Math.min(Math.max(fallbackMs, 600), 60000);
+
+      clearRenderProgressTimeout();
+      stopRenderProgressInterval();
+
+      renderProgressModeRef.current = 'processing';
+      renderProgressEstimateRef.current = clampedEstimate;
+      transferBaseProgressRef.current = 0;
+      transferTotalBytesRef.current = null;
+      transferStartedAtRef.current = null;
+      currentProcessingMsRef.current = null;
+
+      renderProgressStartRef.current = performance.now();
+      setRenderProgress(0.05);
+      setRenderEtaSeconds(Math.round((clampedEstimate / 1000) * 10) / 10);
+
+      renderProgressTimerRef.current = window.setInterval(() => {
+        const elapsed = performance.now() - renderProgressStartRef.current;
+        let estimatedTotal = renderProgressEstimateRef.current;
+
+        if (elapsed > estimatedTotal * 0.98) {
+          estimatedTotal = Math.min(60000, Math.max(elapsed / 0.98, estimatedTotal));
+          renderProgressEstimateRef.current = estimatedTotal;
+        }
+
+        const predicted = estimatedTotal > 0 ? elapsed / estimatedTotal : 0;
+        const capped = Math.min(0.98, Math.max(0.05, predicted));
+
+        setRenderProgress((previous) => (capped > previous ? capped : previous));
+
+        const remainingMs = Math.max(0, renderProgressEstimateRef.current - elapsed);
+        setRenderEtaSeconds(
+          remainingMs > 80 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
+        );
+      }, 120);
+    },
+    [clearRenderProgressTimeout, stopRenderProgressInterval],
+  );
+
+  const concludeRenderProgress = useCallback(
+    (metrics: { totalMs: number | null; processingMs: number | null; transferMs: number | null }) => {
+      clearRenderProgressTimeout();
+      stopRenderProgressInterval();
+
+      renderProgressModeRef.current = 'completed';
+      transferStartedAtRef.current = null;
+      transferTotalBytesRef.current = null;
+
+      const totalMs = metrics.totalMs;
+      const processingMs = metrics.processingMs;
+      const transferMs = metrics.transferMs;
+
+      if (Number.isFinite(totalMs) && totalMs !== null) {
+        const sanitizedTotal = Math.min(Math.max(totalMs, 400), 60000);
+        lastRenderDurationRef.current = Math.min(
+          60000,
+          lastRenderDurationRef.current * 0.4 + sanitizedTotal * 0.6,
+        );
+      } else if (Number.isFinite(processingMs) && processingMs !== null) {
+        const sanitizedProcessing = Math.min(Math.max(processingMs, 400), 60000);
+        lastRenderDurationRef.current = Math.min(
+          60000,
+          lastRenderDurationRef.current * 0.4 + sanitizedProcessing * 0.6,
+        );
+      }
+
+      if (Number.isFinite(transferMs) && transferMs !== null) {
+        lastTransferDurationRef.current = Math.min(
+          60000,
+          lastTransferDurationRef.current * 0.4 + transferMs * 0.6,
+        );
+      }
+
+      setRenderProgress(1);
+      setRenderEtaSeconds(0);
+
+      renderProgressSettledTimeoutRef.current = window.setTimeout(() => {
+        renderProgressModeRef.current = 'idle';
+        setRenderProgress(0);
+        setRenderEtaSeconds(null);
+        renderProgressSettledTimeoutRef.current = null;
+      }, 480);
+    },
+    [clearRenderProgressTimeout, stopRenderProgressInterval],
+  );
+
+  const beginTransferProgress = useCallback(
+    (maybeTotalBytes: number | null) => {
+      if (renderProgressModeRef.current === 'transfer') {
+        if (
+          maybeTotalBytes &&
+          maybeTotalBytes > 0 &&
+          (!transferTotalBytesRef.current || transferTotalBytesRef.current <= 0)
+        ) {
+          transferTotalBytesRef.current = maybeTotalBytes;
+        }
+        return transferBaseProgressRef.current;
+      }
+
+      renderProgressModeRef.current = 'transfer';
+      transferTotalBytesRef.current = maybeTotalBytes ?? null;
+      transferStartedAtRef.current = performance.now();
+      stopRenderProgressInterval();
+
+      const baseProgress = Math.min(0.95, Math.max(renderProgress, 0.12));
+      transferBaseProgressRef.current = baseProgress;
+
+      setRenderProgress((previous) => (previous < baseProgress ? baseProgress : previous));
+      setRenderEtaSeconds(null);
+
+      return baseProgress;
+    },
+    [renderProgress, stopRenderProgressInterval],
+  );
+
+  const handleDownloadProgressUpdate = useCallback(
+    (update: DownloadGifProgressUpdate) => {
+      if (update.phase === 'processing-complete') {
+        const normalizedProcessing =
+          Number.isFinite(update.processingMs) && update.processingMs !== null
+            ? update.processingMs
+            : update.elapsedMs;
+        currentProcessingMsRef.current = normalizedProcessing;
+
+        const estimatedTransfer =
+          lastTransferDurationRef.current > 0
+            ? Math.max(600, lastTransferDurationRef.current)
+            : Math.max(600, normalizedProcessing * 0.35);
+
+        const nextEstimate = normalizedProcessing + estimatedTransfer;
+        renderProgressEstimateRef.current = Math.min(Math.max(nextEstimate, 600), 60000);
+
+        const elapsed = performance.now() - renderProgressStartRef.current;
+        const remainingMs = Math.max(0, renderProgressEstimateRef.current - elapsed);
+        setRenderEtaSeconds(
+          remainingMs > 80 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
+        );
+        return;
+      }
+
+      if (update.phase === 'transfer') {
+        const totalBytesHint =
+          update.totalBytes !== null ? update.totalBytes : transferTotalBytesRef.current;
+        const base = beginTransferProgress(totalBytesHint ?? null);
+
+        if (update.totalBytes !== null && update.totalBytes > 0) {
+          transferTotalBytesRef.current = update.totalBytes;
+        }
+
+        const totalBytes = transferTotalBytesRef.current;
+        const elapsed = update.elapsedMs;
+
+        let ratio = 0;
+        if (totalBytes && totalBytes > 0) {
+          ratio = Math.min(1, update.transferredBytes / totalBytes);
+        } else if (elapsed > 0) {
+          const fallbackTransfer = Math.max(lastTransferDurationRef.current, elapsed);
+          ratio = Math.min(1, elapsed / fallbackTransfer);
+        }
+
+        const progress = base + (1 - base) * ratio;
+        setRenderProgress(progress);
+
+        if (ratio > 0) {
+          const estimatedTotal = elapsed / ratio;
+          const remainingMs = Math.max(0, estimatedTotal - elapsed);
+          setRenderEtaSeconds(
+            remainingMs > 60 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
+          );
+        } else {
+          setRenderEtaSeconds(null);
+        }
+        return;
+      }
+
+      if (update.phase === 'complete') {
+        if (Number.isFinite(update.transferDurationMs) && update.transferDurationMs !== null) {
+          lastTransferDurationRef.current = Math.min(
+            60000,
+            lastTransferDurationRef.current * 0.4 + update.transferDurationMs * 0.6,
+          );
+        }
+      }
+    },
+    [beginTransferProgress],
+  );
+
+  useEffect(() => {
+    return () => {
+      stopRenderProgressInterval();
+      clearRenderProgressTimeout();
+      renderProgressModeRef.current = 'idle';
+    };
+  }, [stopRenderProgressInterval, clearRenderProgressTimeout]);
 
   useEffect(() => {
     if (!selectedLine) {
@@ -727,6 +967,10 @@ export default function Home() {
     }));
 
     setIsExporting(true);
+    startRenderProgress(lastRenderDurationRef.current);
+
+    const renderOutcome: { totalMs: number | null; processingMs: number | null; transferMs: number | null } =
+      { totalMs: null, processingMs: null, transferMs: null };
     try {
       const background = await ensureBackgroundForExport({
         source: canvasBackground?.src ?? null,
@@ -742,7 +986,23 @@ export default function Home() {
       });
 
       const filename = buildExportFilename(exportFilename);
-      await downloadGIF(payload, { filename });
+      const renderResult = await downloadGIF(payload, {
+        filename,
+        onProgress: handleDownloadProgressUpdate,
+      });
+
+      renderOutcome.processingMs =
+        renderResult.processingMs !== null && Number.isFinite(renderResult.processingMs)
+          ? renderResult.processingMs
+          : null;
+      renderOutcome.transferMs =
+        renderResult.transferDurationMs !== null && Number.isFinite(renderResult.transferDurationMs)
+          ? renderResult.transferDurationMs
+          : null;
+      renderOutcome.totalMs =
+        renderResult.totalDurationMs !== null && Number.isFinite(renderResult.totalDurationMs)
+          ? renderResult.totalDurationMs
+          : renderResult.responseDurationMs;
     } catch (error) {
       const { errorId, requestId } = extractServerErrorMeta(error);
 
@@ -763,9 +1023,20 @@ export default function Home() {
         : 'Unable to export the GIF right now. Please try again.';
       window.alert(alertMessage);
     } finally {
+      concludeRenderProgress(renderOutcome);
       setIsExporting(false);
     }
-  }, [canvasBackground, exportFilename, isExporting, lines, parsedCanvasHeight, parsedCanvasWidth]);
+  }, [
+    canvasBackground,
+    concludeRenderProgress,
+    exportFilename,
+    handleDownloadProgressUpdate,
+    isExporting,
+    lines,
+    parsedCanvasHeight,
+    parsedCanvasWidth,
+    startRenderProgress,
+  ]);
 
   return (
     <div className="flex min-h-screen flex-col bg-stone-950 font-sans text-white">
@@ -847,6 +1118,8 @@ export default function Home() {
           exportFilename={exportFilename}
           onExportFilenameChange={handleExportFilenameChange}
           uploadNotice={uploadNotice}
+          renderProgress={renderProgress}
+          renderEtaSeconds={renderEtaSeconds}
         />
       </main>
       <input

@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-K]
+// 🔍 WHAT WAS WRONG:
+// The frontend had no reliable timing signal from the encoder, so progress indicators guessed blindly and users had no idea when renders would finish.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without surfaced processing times we could not calibrate a determinate loading bar, leaving designers unsure whether to wait or retry.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Return the measured processing duration and frame counts as response headers so the UI can learn from real timings and present an accurate progress bar.
 // 🛠️ EDIT LOG [2025-11-11-J]
 // 🔍 WHAT WAS WRONG:
 // We lacked hard numbers for decode, draw, and encode timings, making it risky to optimise without a baseline and risking regressions in GIF fidelity.
@@ -123,6 +130,7 @@
 // Wire the new encoder utility tests into CI and keep future frame logic behind the helper so coverage stays focused.
 
 import { NextResponse } from 'next/server';
+import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import GIFEncoder from 'gifencoder';
 
@@ -141,7 +149,7 @@ import {
   computeArrowHeadDimensions,
   type ArrowHeadDimensions,
 } from '@/lib/render/arrowGeometry';
-import { addFrameToEncoder } from './encoderUtils';
+import { addFrameToEncoder, normalizeFrameData } from './encoderUtils';
 
 export const runtime = 'nodejs';
 
@@ -152,6 +160,16 @@ type CanvasInstance = ReturnType<CanvasFactory>;
 type Canvas2DContext = CanvasInstance extends { getContext(type: '2d'): infer C }
   ? C
   : CanvasLikeContext;
+
+type PreparedRenderLine = {
+  original: RenderLineInput;
+  strokeWidth: number;
+  hasControl: boolean;
+  arrowDimensions: ArrowHeadDimensions | null;
+  endPoint: { x: number; y: number };
+  tangent: { dx: number; dy: number };
+  tangentMagnitude: number;
+};
 
 /**
  * Next.js runs the frontend and backend together when you execute `npm run dev`;
@@ -164,6 +182,7 @@ type RenderTimingMetrics = {
   finalizeMs: number;
   totalFrames: number;
   skippedFrames: number;
+  encodedFrames: number;
 };
 
 export async function POST(request: Request) {
@@ -181,6 +200,8 @@ export async function POST(request: Request) {
 
     const { buffer, metrics } = await renderGif(payload);
     const responseBody = toArrayBuffer(buffer);
+    const processingMs =
+      metrics.decodeMs + metrics.drawMs + metrics.enqueueMs + metrics.finalizeMs;
 
     logServerMessage('info', 'render-gif:success', {
       requestId,
@@ -193,6 +214,8 @@ export async function POST(request: Request) {
         finalizeMs: Number(metrics.finalizeMs.toFixed(2)),
         totalFrames: metrics.totalFrames,
         skippedFrames: metrics.skippedFrames,
+        encodedFrames: metrics.encodedFrames,
+        processingMs: Number(processingMs.toFixed(2)),
       },
     });
 
@@ -203,6 +226,8 @@ export async function POST(request: Request) {
         'Content-Disposition': 'attachment; filename="animation.gif"',
         'Cache-Control': 'no-store',
         'Content-Length': buffer.byteLength.toString(),
+        'X-Render-Processing-Ms': processingMs.toFixed(2),
+        'X-Render-Encoded-Frames': metrics.encodedFrames.toString(),
       },
     });
   } catch (error) {
@@ -245,7 +270,7 @@ function validatePayload(payload: RenderGifPayload) {
   }
 }
 
-async function renderGif(payload: RenderGifPayload): Promise<{
+export async function renderGif(payload: RenderGifPayload): Promise<{
   buffer: Buffer;
   metrics: RenderTimingMetrics;
 }> {
@@ -266,6 +291,7 @@ async function renderGif(payload: RenderGifPayload): Promise<{
     finalizeMs: 0,
     totalFrames,
     skippedFrames: 0,
+    encodedFrames: 0,
   };
 
   const decodeStartedAt = performance.now();
@@ -277,19 +303,55 @@ async function renderGif(payload: RenderGifPayload): Promise<{
 
   const { encoder, completion } = createGifEncoder(width, height, delayMs);
 
+  const preparedLines = prepareRenderLines(Array.isArray(lines) ? lines : []);
+  let pendingDelay = delayMs;
+  let lastFrameSignature: string | null = null;
+  let lastFrameBuffer: Buffer | null = null;
+
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
     const frameStartedAt = performance.now();
     clearFrame(context, width, height);
     drawBackground(context, backgroundImage, width, height);
 
-    drawLines(context, lines);
-    drawObjects(context, objects, lines, frameIndex, totalFrames);
+    drawLines(context, preparedLines);
+    drawObjects(context, objects, preparedLines, frameIndex, totalFrames);
     timings.drawMs += performance.now() - frameStartedAt;
 
     const frame = context.getImageData(0, 0, width, height);
+    const frameBuffer = Buffer.from(normalizeFrameData(frame.data));
+    const frameSignature = computeFrameSignature(frameBuffer);
+
+    if (lastFrameSignature === null) {
+      lastFrameSignature = frameSignature;
+      lastFrameBuffer = frameBuffer;
+      continue;
+    }
+
+    if (frameSignature === lastFrameSignature) {
+      pendingDelay += delayMs;
+      timings.skippedFrames += 1;
+      continue;
+    }
+
+    if (lastFrameBuffer) {
+      const enqueueStartedAt = performance.now();
+      encoder.setDelay(pendingDelay);
+      addFrameToEncoder(encoder, lastFrameBuffer);
+      timings.enqueueMs += performance.now() - enqueueStartedAt;
+      timings.encodedFrames += 1;
+    }
+
+    pendingDelay = delayMs;
+    lastFrameSignature = frameSignature;
+    lastFrameBuffer = frameBuffer;
+  }
+
+  if (lastFrameBuffer) {
     const enqueueStartedAt = performance.now();
-    addFrameToEncoder(encoder, frame);
+    encoder.setDelay(pendingDelay);
+    addFrameToEncoder(encoder, lastFrameBuffer);
     timings.enqueueMs += performance.now() - enqueueStartedAt;
+    timings.encodedFrames += 1;
   }
 
   const finalizeStartedAt = performance.now();
@@ -298,6 +360,32 @@ async function renderGif(payload: RenderGifPayload): Promise<{
   timings.finalizeMs = performance.now() - finalizeStartedAt;
 
   return { buffer, metrics: timings };
+}
+
+function prepareRenderLines(lines: RenderLineInput[]): PreparedRenderLine[] {
+  if (!Array.isArray(lines) || lines.length === 0) {
+    return [];
+  }
+
+  return lines.map((line) => {
+    const strokeWidth = Math.max(MIN_LINE_WIDTH, line.strokeWidth ?? MIN_LINE_WIDTH);
+    const approxLength = approximateRenderLineLength(line);
+    const arrowDimensions =
+      line.endCap === 'arrow' ? computeArrowHeadDimensions(strokeWidth, approxLength) : null;
+    const tangent = evaluateLineTangent(line, 1);
+    const tangentMagnitude = Math.hypot(tangent.dx, tangent.dy);
+    const endPoint = evaluateLinePoint(line, 1);
+
+    return {
+      original: line,
+      strokeWidth,
+      hasControl: hasControlPoint(line),
+      arrowDimensions,
+      endPoint,
+      tangent,
+      tangentMagnitude,
+    };
+  });
 }
 
 function loadCanvasBindings() {
@@ -364,6 +452,13 @@ function createGifEncoder(
 function clearFrame(context: Canvas2DContext, width: number, height: number) {
   if (typeof (context as { clearRect?: unknown }).clearRect === 'function') {
     (context as { clearRect: (x: number, y: number, w: number, h: number) => void }).clearRect(0, 0, width, height);
+    return;
+  }
+
+  const bitmap = (context as { bitmap?: { data?: { fill?: (...args: number[]) => unknown } } }).bitmap;
+  const data = bitmap?.data;
+  if (data && typeof data.fill === 'function') {
+    data.fill(0);
   }
 }
 
@@ -401,32 +496,25 @@ function sanitizeFps(fps: RenderGifPayload['fps']) {
   return Math.min(60, Math.max(1, Math.round(parsed)));
 }
 
-function drawLines(context: Canvas2DContext, lines: RenderLineInput[]) {
-  if (!Array.isArray(lines)) {
+function drawLines(context: Canvas2DContext, lines: PreparedRenderLine[]) {
+  if (!Array.isArray(lines) || lines.length === 0) {
     return;
   }
 
-  lines.forEach((line) => {
-    const strokeWidth = Math.max(MIN_LINE_WIDTH, line.strokeWidth ?? MIN_LINE_WIDTH);
-    const approxLength = approximateRenderLineLength(line);
-    const arrowDimensions =
-      line.endCap === 'arrow'
-        ? computeArrowHeadDimensions(strokeWidth, approxLength)
-        : null;
-    const endPoint = evaluateLinePoint(line, 1);
-    const tangent = evaluateLineTangent(line, 1);
-    const tangentMagnitude = Math.hypot(tangent.dx, tangent.dy);
+  lines.forEach((lineInfo) => {
+    const line = lineInfo.original;
+    const arrowDimensions = lineInfo.arrowDimensions;
 
     context.save();
     context.beginPath();
     context.moveTo(line.x1, line.y1);
-    if (hasControlPoint(line)) {
+    if (lineInfo.hasControl) {
       strokeQuadraticCurve(
         context as unknown as QuadraticContext,
         line.x1,
         line.y1,
-        line.controlX,
-        line.controlY,
+        line.controlX!,
+        line.controlY!,
         line.x2,
         line.y2,
       );
@@ -434,7 +522,7 @@ function drawLines(context: Canvas2DContext, lines: RenderLineInput[]) {
       context.lineTo(line.x2, line.y2);
     }
     context.strokeStyle = line.strokeColor ?? '#FFFFFF';
-    context.lineWidth = strokeWidth;
+    context.lineWidth = lineInfo.strokeWidth;
     if ('lineCap' in context) {
       (context as Canvas2DContext & { lineCap: unknown }).lineCap = arrowDimensions ? 'butt' : 'round';
     }
@@ -443,9 +531,9 @@ function drawLines(context: Canvas2DContext, lines: RenderLineInput[]) {
     }
     context.stroke();
     context.restore();
-    if (arrowDimensions && tangentMagnitude > 0) {
-      const angle = Math.atan2(tangent.dy, tangent.dx);
-      drawArrowHead(context, line, endPoint, angle, arrowDimensions);
+    if (arrowDimensions && lineInfo.tangentMagnitude > 0) {
+      const angle = Math.atan2(lineInfo.tangent.dy, lineInfo.tangent.dx);
+      drawArrowHead(context, line, lineInfo.endPoint, angle, arrowDimensions);
     }
   });
 }
@@ -473,7 +561,7 @@ function drawArrowHead(
 function drawObjects(
   context: Canvas2DContext,
   objects: RenderObjectInput[],
-  lines: RenderLineInput[],
+  preparedLines: PreparedRenderLine[],
   frameIndex: number,
   totalFrames: number,
 ) {
@@ -482,11 +570,12 @@ function drawObjects(
   }
 
   objects.forEach((object) => {
-    const line = lines[object.lineIndex];
-    if (!line) {
+    const lineInfo = preparedLines[object.lineIndex];
+    if (!lineInfo) {
       return;
     }
 
+    const line = lineInfo.original;
     const position = calculateObjectPosition(object, line, frameIndex, totalFrames);
     if (!position) {
       return;
@@ -642,6 +731,10 @@ function summarizePayload(payload: RenderGifPayload) {
     lineCount: Array.isArray(payload.lines) ? payload.lines.length : 0,
     objectCount: Array.isArray(payload.objects) ? payload.objects.length : 0,
   };
+}
+
+function computeFrameSignature(buffer: Buffer) {
+  return createHash('sha1').update(buffer).digest('hex');
 }
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {

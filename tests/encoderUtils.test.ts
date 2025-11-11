@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-U]
+// 🔍 WHAT WAS WRONG:
+// The encoder utility gained Buffer support, but the test suite still only exercised CanvasImageData inputs, missing the new fast-path coverage.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without an assertion for the Buffer branch we could reintroduce unintended copies and lose the optimisation silently.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added a focused test that ensures Buffers flow through untouched while keeping the existing CanvasImageData checks intact.
 // 🛠️ EDIT LOG [2025-11-11-T]
 // 🔍 WHAT WAS WRONG:
 // The GIF frame conversion helper lived untested, so ArrayBuffer regressions kept sneaking back in without warning.
@@ -72,6 +79,24 @@ test('addFrameToEncoder accepts ArrayBuffer frame data', () => {
   const buffer = received as Buffer;
   assert.equal(buffer.byteLength, 2);
   assert.deepEqual([...buffer.values()], [30, 40]);
+});
+
+test('addFrameToEncoder forwards Buffer data without copying', () => {
+  const frameBuffer = Buffer.from([50, 60]);
+
+  let received: Buffer | null = null;
+  const encoder = {
+    addFrame: (chunk: Buffer) => {
+      received = chunk;
+    },
+  };
+
+  addFrameToEncoder(encoder, frameBuffer);
+
+  assert.ok(received, 'encoder should receive the provided buffer');
+  assert.strictEqual(received, frameBuffer, 'buffer instance should be forwarded directly');
+  frameBuffer[0] = 99;
+  assert.equal(received?.[0], 99, 'forwarded buffer should reference the same memory');
 });
 
 

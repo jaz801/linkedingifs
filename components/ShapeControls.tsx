@@ -1,5 +1,19 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-G]
+// 🔍 WHAT WAS WRONG:
+// The export rail showed a determinate bar, but it still idled at “Wrapping up…” while the browser streamed the GIF, so the UI lied about completion.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Progress must cover both encoding and download phases; otherwise designers can’t tell when it’s safe to leave the tab.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Drive the bar with streaming updates from the client so the percentage and countdown land exactly when the file finishes downloading.
+// 🛠️ EDIT LOG [2025-11-11-F]
+// 🔍 WHAT WAS WRONG:
+// The export panel only showed an indeterminate bar while renders were in flight, so designers had no guidance on how long GIF generation would take.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without a determinate progress indicator and ETA, longer renders felt broken and users kept retrying downloads unnecessarily.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Thread the new progress percentage and remaining time into the panel and render a determinate bar with countdown messaging while exports run.
 // 🛠️ EDIT LOG [2025-11-11-E]
 // 🔍 WHAT WAS WRONG:
 // The export rail still claimed PNG-only backgrounds and failed to confirm that downloads respect the canvas dimensions, causing confusion about JPEG support and output sizing.
@@ -80,6 +94,8 @@ type ShapeControlsProps = {
   exportFilename: string;
   onExportFilenameChange: (event: ChangeEvent<HTMLInputElement>) => void;
   uploadNotice: string | null;
+  renderProgress: number;
+  renderEtaSeconds: number | null;
 };
 
 const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
@@ -119,6 +135,8 @@ export function ShapeControls({
   exportFilename,
   onExportFilenameChange,
   uploadNotice,
+  renderProgress,
+  renderEtaSeconds,
 }: ShapeControlsProps) {
   const formattedObjectColor = useMemo(
     () => color.replace('#', '').toUpperCase(),
@@ -128,6 +146,9 @@ export function ShapeControls({
     () => shapeColor.replace('#', '').toUpperCase(),
     [shapeColor],
   );
+  const progressPercentage = Math.max(0, Math.min(100, Math.round(renderProgress * 100)));
+  const shouldShowProgress = isDownloadInProgress || progressPercentage > 0;
+  const etaLabel = formatEtaLabel(renderEtaSeconds, progressPercentage);
 
   return (
     <aside className="order-3 flex w-full flex-col gap-5 rounded-3xl border border-white/10 bg-stone-900/70 p-4 text-xs shadow-2xl shadow-black/30 backdrop-blur lg:order-3 lg:min-w-[260px] lg:max-w-[320px] lg:h-full lg:self-start lg:overflow-y-auto">
@@ -410,7 +431,7 @@ export function ShapeControls({
             {isDownloadInProgress ? 'Preparing…' : 'Download'}
           </button>
         </div>
-        {isDownloadInProgress ? (
+        {shouldShowProgress ? (
           <div
             className="flex w-full flex-col gap-1.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
             role="status"
@@ -418,9 +439,20 @@ export function ShapeControls({
           >
             <div className="flex items-center justify-between text-[11px] text-white/60">
               <span>Rendering GIF…</span>
-              <span className="animate-pulse text-white/80">Working</span>
+              <span className="text-white/80">{etaLabel}</span>
             </div>
-            <progress className="h-1.5 w-full overflow-hidden rounded-full accent-white" />
+            <div
+              className="relative h-1.5 w-full overflow-hidden rounded-full bg-white/15"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progressPercentage}
+            >
+              <div
+                className="absolute left-0 top-0 h-full rounded-full bg-white transition-[width] duration-200 ease-out"
+                style={{ width: `${Math.max(4, Math.min(100, progressPercentage))}%` }}
+              />
+            </div>
           </div>
         ) : null}
         {uploadNotice ? (
@@ -438,6 +470,22 @@ export function ShapeControls({
       </section>
     </aside>
   );
+}
+
+function formatEtaLabel(etaSeconds: number | null, progressPercentage: number) {
+  if (etaSeconds === null) {
+    return progressPercentage >= 99 ? 'Wrapping up' : 'Calculating…';
+  }
+
+  if (etaSeconds <= 0.2 || progressPercentage >= 99) {
+    return 'Wrapping up';
+  }
+
+  if (etaSeconds < 10) {
+    return `~${etaSeconds.toFixed(1)}s remaining`;
+  }
+
+  return `~${Math.round(etaSeconds)}s remaining`;
 }
 
 function renderShapeIcon(type: LineShapeType) {

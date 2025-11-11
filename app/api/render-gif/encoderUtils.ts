@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-AV]
+// 🔍 WHAT WAS WRONG:
+// The encoder helper only accepted CanvasImageData, forcing every caller to re-normalize frame buffers and preventing dedupe logic from reusing precomputed snapshots.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Upcoming optimisations retain frame buffers for hashing and delay aggregation; copying them just to satisfy the helper would negate the performance win.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Allow both CanvasImageData and Buffer inputs so callers can feed cached frame data directly while existing tests keep validating the Canvas pathway.
 // 🛠️ EDIT LOG [2025-11-11-AU]
 // 🔍 WHAT WAS WRONG:
 // GIF frame conversion lived inline in the route, so it was untested and type drift kept breaking builds whenever the encoder or canvas typings shifted.
@@ -21,7 +28,12 @@ export function normalizeFrameData(source: ArrayBuffer | ArrayBufferView): Buffe
   return Buffer.from(source);
 }
 
-export function addFrameToEncoder(encoder: EncoderLike, frame: CanvasImageData) {
+export function addFrameToEncoder(encoder: EncoderLike, frame: CanvasImageData | Buffer) {
+  if (Buffer.isBuffer(frame)) {
+    encoder.addFrame(frame);
+    return;
+  }
+
   encoder.addFrame(normalizeFrameData(frame.data));
 }
 
