@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-C]
+// 🔍 WHAT WAS WRONG:
+// The GIF route needed explicit typings for `getImageData`, but the shared canvas shim never declared it, so downstream code kept widening frame pixels to `ArrayBuffer`.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without an accurate signature our encoder wrapper regressed type safety and forced every consumer to re-declare the image data shape.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Export a reusable `CanvasImageData` type and surface `getImageData` on the context shim so renderers can depend on a single source of truth.
 // 🛠️ EDIT LOG [2025-11-11-B]
 // 🔍 WHAT WAS WRONG:
 // The fallback renderer's context exposed `quadraticCurveTo` at runtime, but our TypeScript shim forgot to declare it.
@@ -40,5 +47,12 @@ export type CanvasLikeContext = {
     dWidth?: number,
     dHeight?: number,
   ): void;
+  getImageData(x: number, y: number, width: number, height: number): CanvasImageData;
+};
+
+export type CanvasImageData = {
+  width: number;
+  height: number;
+  data: Uint8Array | ArrayBuffer;
 };
 

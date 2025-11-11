@@ -1,3 +1,17 @@
+// 🛠️ EDIT LOG [2025-11-11-I]
+// 🔍 WHAT WAS WRONG:
+// The route owned the encoder helper outright, so we still lacked reusable coverage and kept re-learning the frame contract.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without a shareable module we could not test the conversion in isolation, and the helper stayed tightly coupled to the route.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Moved the frame conversion into `encoderUtils` and wrapped it with unit tests so future encoder swaps surface errors without touching the route.
+// 🛠️ EDIT LOG [2025-11-11-G]
+// 🔍 WHAT WAS WRONG:
+// TypeScript collapsed the canvas frame data to `ArrayBuffer`, so passing it straight into `encoder.addFrame` triggered a compile-time type error and blocked builds.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Production exports must build cleanly; leaving the route red would keep `next build` from succeeding and prevent shipping other fixes.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Normalize each frame into a `Buffer` before enqueueing it, satisfying the encoder’s signature without touching the rendering loop or reallocating more than necessary.
 // 🛠️ EDIT LOG [2025-11-11-F]
 // 🔍 WHAT WAS WRONG:
 // Backend renders still encoded dozens of identical frames when helper shapes were disabled, so even simple line exports took several seconds to finish.
@@ -90,6 +104,16 @@
 //   - #2 on 2025-11-09 [Resolved by switching server encoder to gif-encoder-2]
 // 🚨 Next steps:
 // Add regression tests that call the API route with sample payloads to ensure future refactors keep exports working.
+// 🔁 RECURRING ISSUE TRACKER [GIF Frame Data Type Mismatch]
+// 🧠 ERROR TYPE: TypeScript signature mismatch between canvas `ImageData` and `gifencoder`
+// 📂 FILE: app/api/render-gif/route.ts
+// 🧾 HISTORY: This issue has now occurred 2 times in this project.
+//   - #1 on 2025-11-09 [Narrowed encoder input to match Node-canvas `ImageData` definitions]
+//   - #2 on 2025-11-11 [Normalized frame pixels into `Buffer` before `addFrame` to satisfy the encoder types]
+//   - #3 on 2025-11-11 [Published shared `CanvasImageData` typings and wrapped encoder writes behind `addFrameToEncoder`]
+//   - #4 on 2025-11-11 [Extracted encoder utilities and covered them with unit tests]
+// 🚨 Next steps:
+// Wire the new encoder utility tests into CI and keep future frame logic behind the helper so coverage stays focused.
 
 import { NextResponse } from 'next/server';
 import { performance } from 'node:perf_hooks';
@@ -110,6 +134,7 @@ import {
   computeArrowHeadDimensions,
   type ArrowHeadDimensions,
 } from '@/lib/render/arrowGeometry';
+import { addFrameToEncoder } from './encoderUtils';
 
 export const runtime = 'nodejs';
 
@@ -221,7 +246,7 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
     drawObjects(context, objects, lines, frameIndex, totalFrames);
 
     const frame = context.getImageData(0, 0, width, height);
-    encoder.addFrame(frame.data);
+    addFrameToEncoder(encoder, frame);
   }
 
   encoder.finish();
