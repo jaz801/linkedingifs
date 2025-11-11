@@ -1,5 +1,12 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-F]
+// 🔍 WHAT WAS WRONG:
+// Pointer leave checks assumed `relatedTarget` was always a `Node`, so Render environments threw `Failed to execute 'contains' on 'Node'`.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Hover state got stuck on hosted builds because pointer transitions sometimes yield non-Node targets like `window`.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Guard the containment check behind an `instanceof Node` so the handler safely ignores non-DOM targets without crashing.
 // 🛠️ EDIT LOG [2025-11-11-E]
 // 🔍 WHAT WAS WRONG:
 // The canvas deck floated 20px above the tool selector, breaking the visual hinge between the workspace and its controls.
@@ -383,8 +390,8 @@ export function CanvasStage({
                     key={line.id}
                     onPointerEnter={() => onLinePointerEnter(line.id)}
                     onPointerLeave={(event) => {
-                      const related = event.relatedTarget as Element | null;
-                      if (related && event.currentTarget.contains(related)) {
+                      const relatedTarget = event.relatedTarget;
+                      if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
                         return;
                       }
                       onLinePointerLeave(line.id);
