@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-E]
+// 🔍 WHAT WAS WRONG:
+// Static exports kept encoding 80+ duplicate frames even when no helper shapes animated, so users waited seconds for GIFs that never changed after the first frame.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Exporting still scenes should feel instant; redundant quantization work slowed handoffs and made the UI feel sluggish.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Detect when no shapes animate and collapse the render to a single frame while keeping animated exports untouched, reusing the existing duration math so timings stay consistent.
 // 🛠️ EDIT LOG [2025-11-11-D]
 // 🔍 WHAT WAS WRONG:
 // Arrow heads still sat shy of the line endpoint because round caps extended the stroke, and the default option continued to render a block head.
@@ -224,7 +231,10 @@ export async function exportStageToGif(options: ExportStageOptions) {
   }
 
   const preparedLines = prepareLines(lines, width, height);
-  const totalFrames = Math.max(1, Math.round((durationMs / 1000) * fps));
+  const hasAnimatedShapes = preparedLines.some(
+    (line) => line.animateShapes && line.shapeType && line.shapeCount > 0,
+  );
+  const totalFrames = hasAnimatedShapes ? Math.max(1, Math.round((durationMs / 1000) * fps)) : 1;
   const frameDelay = Math.max(20, Math.round(durationMs / totalFrames));
 
   const gif = new GIF({

@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-F]
+// 🔍 WHAT WAS WRONG:
+// Backend renders still encoded dozens of identical frames when helper shapes were disabled, so even simple line exports took several seconds to finish.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Shipping static canvases should not bottleneck on GIF quantization; wasting time on duplicate frames delayed handoffs and cluttered the render queue.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Skip redundant frames whenever no objects animate, reuse the existing duration math for delay timings, and forward raw ImageData buffers to the encoder to cut per-frame copies.
 // 🛠️ EDIT LOG [2025-11-11-E]
 // 🔍 WHAT WAS WRONG:
 // The renderer forced every stroke width to at least 1px, so the API ignored hairline lines that the UI now supports and exports came out thicker than intended.
@@ -192,8 +199,10 @@ function validatePayload(payload: RenderGifPayload) {
 async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
   const { width, height, background, duration, lines, objects } = payload;
   const fps = sanitizeFps(payload.fps);
-  const totalFrames = Math.max(1, Math.round(duration * fps));
-  const delayMs = Math.max(1, Math.round(1000 / fps));
+  const durationMs = Math.max(0, Math.round(duration * 1000));
+  const hasAnimatedObjects = Array.isArray(objects) && objects.length > 0;
+  const totalFrames = hasAnimatedObjects ? Math.max(1, Math.round(duration * fps)) : 1;
+  const delayMs = Math.max(20, Math.round(durationMs / totalFrames));
 
   const canvasBindings = loadCanvasBindings();
   const { createCanvas, loadImage } = canvasBindings;
@@ -212,7 +221,7 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
     drawObjects(context, objects, lines, frameIndex, totalFrames);
 
     const frame = context.getImageData(0, 0, width, height);
-    encoder.addFrame(Buffer.from(frame.data));
+    encoder.addFrame(frame.data);
   }
 
   encoder.finish();

@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-G]
+// 🔍 WHAT WAS WRONG:
+// Running exports logged the Node deprecation warning for `Buffer()` because the bundled encoder still used the legacy constructor.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Repeated warnings hide real failures and Node plans to drop the old API in future releases, risking sudden runtime breaks.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Replace `new Buffer` with `Buffer.from` to stay compliant without altering how frames are encoded.
 /*
   GIFEncoder.js
 
@@ -17,7 +24,7 @@ function ByteArray() {
 }
 
 ByteArray.prototype.getData = function() {
-  return new Buffer.from(this.data);
+  return Buffer.from(this.data);
 };
 
 ByteArray.prototype.writeByte = function(val) {
