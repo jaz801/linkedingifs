@@ -1,3 +1,24 @@
+// 🛠️ EDIT LOG [2025-11-11-E]
+// 🔍 WHAT WAS WRONG:
+// The renderer forced every stroke width to at least 1px, so the API ignored hairline lines that the UI now supports and exports came out thicker than intended.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers need sub-pixel guides to survive backend rendering; clamping at 1px broke parity with the canvas and GIF exporter.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Standardized on a 0.001 minimum stroke width and reused it when drawing lines and arrow heads so fractional values render faithfully.
+// 🛠️ EDIT LOG [2025-11-11-D]
+// 🔍 WHAT WAS WRONG:
+// Arrow heads still stopped short of the line tip because round stroke caps extended past the endpoint, and the plain option continued to add a block head.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Server renders must leave straight lines untouched while snapping an arrow flush when requested.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Switch to butt caps when arrows are active and skip rendering extra geometry for the default line mode so both outputs stay aligned.
+// 🛠️ EDIT LOG [2025-11-11-C]
+// 🔍 WHAT WAS WRONG:
+// The server renderer never drew the selected arrow/block end caps, so API exports shipped rounded tips regardless of UI state.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Backend renders must mirror the canvas or downloaded GIFs lose critical annotation context.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added end-cap metadata to the payload and render pipeline so the Node canvas draws the correct terminal geometry.
 // 🛠️ EDIT LOG [Cursor Rule #1]
 // 🔍 WHAT WAS WRONG:
 // The frontend called `/api/render-gif`, but no backend handler existed, so every export attempt failed with “Unable to render GIF at this time.”
@@ -41,6 +62,18 @@
 // The GIF renderer is part of the production build; the compiler error blocked deploys entirely.
 // ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-E):
 // Passed `false` for the optional flag to match the type definition without altering runtime behaviour.
+// 🔍 WHAT WAS WRONG (2025-11-11-A):
+// Rounded helper shapes ignored the new curved lines from arrow mode, because the renderer only knew about straight segments.
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-11-A):
+// Flattening curvature in the exported GIF made the server output diverge from the canvas preview and broke animation alignment.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-11-A):
+// Accept optional control points in the payload, draw quadratic curves when present, and drive helper positions from Bézier tangents so exports stay faithful.
+// 🔍 WHAT WAS WRONG (2025-11-11-B):
+// The PureImage shim powering server exports silently ignored `quadraticCurveTo`, so bent lines vanished even though helper objects kept animating.
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-11-B):
+// GIF handoffs must match the on-canvas preview; dropping the stroke makes curved annotations unusable for clients.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-11-B):
+// Reuse the shared quadratic fallback to approximate curves with short line segments whenever the context lacks native support.
 
 // 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
 // 🧠 ERROR TYPE: Missing backend counterpart for frontend feature
@@ -56,6 +89,8 @@ import { performance } from 'node:perf_hooks';
 import GIFEncoder from 'gifencoder';
 
 import type { RenderGifPayload, RenderLineInput, RenderObjectInput } from '@/lib/render/schema';
+import type { QuadraticContext } from '@/lib/render/drawLine';
+import { strokeQuadraticCurve } from '@/lib/render/drawLine';
 import {
   createServerEventId,
   logServerMessage,
@@ -63,8 +98,15 @@ import {
 } from '@/lib/monitoring/serverLogger';
 import { getCanvasModule } from '@/lib/canvas/server';
 import type { CanvasLikeContext } from '@/lib/render/canvasContext';
+import {
+  approximateLineLength,
+  computeArrowHeadDimensions,
+  type ArrowHeadDimensions,
+} from '@/lib/render/arrowGeometry';
 
 export const runtime = 'nodejs';
+
+const MIN_LINE_WIDTH = 0.001;
 
 type CanvasFactory = ReturnType<typeof getCanvasModule>['createCanvas'];
 type CanvasInstance = ReturnType<CanvasFactory>;
@@ -285,18 +327,67 @@ function drawLines(context: Canvas2DContext, lines: RenderLineInput[]) {
   }
 
   lines.forEach((line) => {
+    const strokeWidth = Math.max(MIN_LINE_WIDTH, line.strokeWidth ?? MIN_LINE_WIDTH);
+    const approxLength = approximateRenderLineLength(line);
+    const arrowDimensions =
+      line.endCap === 'arrow'
+        ? computeArrowHeadDimensions(strokeWidth, approxLength)
+        : null;
+    const endPoint = evaluateLinePoint(line, 1);
+    const tangent = evaluateLineTangent(line, 1);
+    const tangentMagnitude = Math.hypot(tangent.dx, tangent.dy);
+
     context.save();
     context.beginPath();
     context.moveTo(line.x1, line.y1);
-    context.lineTo(line.x2, line.y2);
+    if (hasControlPoint(line)) {
+      strokeQuadraticCurve(
+        context as unknown as QuadraticContext,
+        line.x1,
+        line.y1,
+        line.controlX,
+        line.controlY,
+        line.x2,
+        line.y2,
+      );
+    } else {
+      context.lineTo(line.x2, line.y2);
+    }
     context.strokeStyle = line.strokeColor ?? '#FFFFFF';
-    context.lineWidth = Math.max(1, line.strokeWidth ?? 1);
+    context.lineWidth = strokeWidth;
     if ('lineCap' in context) {
-      (context as Canvas2DContext & { lineCap: unknown }).lineCap = 'round';
+      (context as Canvas2DContext & { lineCap: unknown }).lineCap = arrowDimensions ? 'butt' : 'round';
+    }
+    if ('lineJoin' in context) {
+      (context as Canvas2DContext & { lineJoin: unknown }).lineJoin = arrowDimensions ? 'miter' : 'round';
     }
     context.stroke();
     context.restore();
+    if (arrowDimensions && tangentMagnitude > 0) {
+      const angle = Math.atan2(tangent.dy, tangent.dx);
+      drawArrowHead(context, line, endPoint, angle, arrowDimensions);
+    }
   });
+}
+
+function drawArrowHead(
+  context: Canvas2DContext,
+  line: RenderLineInput,
+  endPoint: { x: number; y: number },
+  angle: number,
+  dimensions: ArrowHeadDimensions,
+) {
+  context.save();
+  context.translate(endPoint.x, endPoint.y);
+  context.rotate(angle);
+  context.fillStyle = line.strokeColor ?? '#FFFFFF';
+  context.beginPath();
+  context.moveTo(0, dimensions.halfWidth);
+  context.lineTo(0, -dimensions.halfWidth);
+  context.lineTo(dimensions.headLength, 0);
+  context.closePath();
+  context.fill();
+  context.restore();
 }
 
 function drawObjects(
@@ -353,26 +444,86 @@ function calculateObjectPosition(
   frameIndex: number,
   totalFrames: number,
 ) {
-  const dx = line.x2 - line.x1;
-  const dy = line.y2 - line.y1;
-  const length = Math.hypot(dx, dy);
-
-  if (length === 0) {
-    return null;
-  }
-
   const baseOffset = typeof object.offset === 'number' ? object.offset : 0;
   const speed = typeof object.speed === 'number' ? object.speed : 1;
   const direction = object.direction === 'backwards' ? -1 : 1;
 
   const progress = normalizeProgress(baseOffset + direction * speed * (frameIndex / totalFrames));
 
-  const distanceAlongLine = progress * length;
-  const x = line.x1 + (dx / length) * distanceAlongLine;
-  const y = line.y1 + (dy / length) * distanceAlongLine;
-  const angle = Math.atan2(dy, dx);
+  const point = evaluateLinePoint(line, progress);
+  const tangent = evaluateLineTangent(line, progress);
+  const tangentMagnitude = Math.hypot(tangent.dx, tangent.dy);
 
-  return { x, y, angle };
+  if (tangentMagnitude === 0) {
+    return null;
+  }
+
+  const angle = Math.atan2(tangent.dy, tangent.dx);
+
+  return { x: point.x, y: point.y, angle };
+}
+
+function hasControlPoint(line: RenderLineInput): line is RenderLineInput & {
+  controlX: number;
+  controlY: number;
+} {
+  return (
+    typeof line.controlX === 'number' &&
+    Number.isFinite(line.controlX) &&
+    typeof line.controlY === 'number' &&
+    Number.isFinite(line.controlY)
+  );
+}
+
+function evaluateLinePoint(line: RenderLineInput, t: number) {
+  const clampedT = Math.max(0, Math.min(1, t));
+
+  if (hasControlPoint(line)) {
+    const oneMinusT = 1 - clampedT;
+    const x =
+      oneMinusT * oneMinusT * line.x1 +
+      2 * oneMinusT * clampedT * line.controlX +
+      clampedT * clampedT * line.x2;
+    const y =
+      oneMinusT * oneMinusT * line.y1 +
+      2 * oneMinusT * clampedT * line.controlY +
+      clampedT * clampedT * line.y2;
+    return { x, y };
+  }
+
+  return {
+    x: line.x1 + (line.x2 - line.x1) * clampedT,
+    y: line.y1 + (line.y2 - line.y1) * clampedT,
+  };
+}
+
+function evaluateLineTangent(line: RenderLineInput, t: number) {
+  const clampedT = Math.max(0, Math.min(1, t));
+
+  if (hasControlPoint(line)) {
+    const oneMinusT = 1 - clampedT;
+    const dx =
+      2 * oneMinusT * (line.controlX - line.x1) + 2 * clampedT * (line.x2 - line.controlX);
+    const dy =
+      2 * oneMinusT * (line.controlY - line.y1) + 2 * clampedT * (line.y2 - line.controlY);
+    return { dx, dy };
+  }
+
+  return {
+    dx: line.x2 - line.x1,
+    dy: line.y2 - line.y1,
+  };
+}
+
+function approximateRenderLineLength(line: RenderLineInput) {
+  if (hasControlPoint(line)) {
+    return (
+      Math.hypot(line.controlX! - line.x1, line.controlY! - line.y1) +
+      Math.hypot(line.x2 - line.controlX!, line.y2 - line.controlY!)
+    );
+  }
+
+  return Math.hypot(line.x2 - line.x1, line.y2 - line.y1);
 }
 
 function normalizeProgress(value: number) {

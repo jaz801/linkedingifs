@@ -1,5 +1,26 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-D]
+// 🔍 WHAT WAS WRONG:
+// Line widths were clamped to whole-pixel values of 1 or greater, so the UI snapped thin strokes back to 1px and exports ignored hairline guides.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Motion designers rely on sub-pixel strokes to match brand templates; losing those widths breaks parity between the canvas, exports, and competing tools.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Introduced a shared 0.001 minimum with three-decimal precision and propagated it through the controls, state normalizer, and render payload so fractional widths survive end to end.
+// 🛠️ EDIT LOG [2025-11-11-C]
+// 🔍 WHAT WAS WRONG:
+// Arrow heads still looked detached because rounded caps extended the stroke past the tip, and the default “block” option added an extra shape instead of staying a plain line.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// The canvas, exporter, and API must agree on when to add arrow geometry while keeping the baseline experience identical to today’s straight lines.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Normalize cap state to a true `line` default and only request arrow geometry when explicitly selected, letting renderers swap to square line caps when needed.
+// 🛠️ EDIT LOG [2025-11-11-B]
+// 🔍 WHAT WAS WRONG:
+// The workflow introduced arrow/block line caps but the page never captured the selection, so previews and GIF exports always reverted to rounded tips.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without persisting the cap choice, designers lost their terminal markers and exported animations failed brand reviews.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added end-cap state with a default block setting, threaded it through the controls, renderer, and export payload so the chosen head survives every render target.
 // 🛠️ EDIT LOG [Cursor Rule #1]
 // 🔍 WHAT WAS WRONG:
 // The workspace was capped at max-w-6xl and the side rails had generous fixed widths, so on desktop the canvas collapsed smaller than the menus surrounding it.
@@ -41,6 +62,12 @@
 // Without a reference ID, neither QA nor developers could match user reports to server-side traces, dragging out triage.
 // ✅ WHY THIS SOLUTION WAS PICKED (2025-11-09-A):
 // Expose the server-provided error ID in alerts and ship it alongside client telemetry so incidents can be correlated immediately.
+// 🔍 WHAT WAS WRONG (2025-11-11-A):
+// Arrow mode never exposed endpoint or midpoint handles, and curved lines collapsed back to straight segments during export.
+// 🤔 WHY IT HAD TO BE CHANGED (2025-11-11-A):
+// Designers need to stretch or bend existing strokes and see those adjustments preserved in rendered GIFs; losing curvature breaks the workflow.
+// ✅ WHY THIS SOLUTION WAS PICKED (2025-11-11-A):
+// Threaded hover-aware handle state into the canvas stage and enriched the render payload with optional control points so curvature survives across the app.
 
 // 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
 // 🧠 ERROR TYPE: Shape state drift across UI layers
@@ -59,7 +86,7 @@ import { LayerList } from '@/components/LayerList';
 import { ShapeControls } from '@/components/ShapeControls';
 import { ToolSelector } from '@/components/ToolSelector';
 import { useLinesManager } from '@/hooks/useLinesManager';
-import type { LineSegment, LineShapeType } from '@/lib/canvas/types';
+import type { LineEndCap, LineSegment, LineShapeType } from '@/lib/canvas/types';
 import { downloadGIF } from '@/lib/export/downloadGif';
 import { bindGlobalErrorListeners, reportClientError } from '@/lib/monitoring/errorReporter';
 import type { RenderGifPayload, RenderObjectInput } from '@/lib/render/schema';
@@ -74,6 +101,19 @@ const supportedImageMimeTypes = new Set(['image/png']);
 const DEFAULT_EXPORT_DURATION_SECONDS = 2.8;
 const DEFAULT_EXPORT_FPS = 30;
 const FALLBACK_BACKGROUND_COLOR = '#0C0A09';
+const MIN_LINE_WIDTH = 0.001;
+const LINE_WIDTH_DECIMAL_PLACES = 3;
+
+function clampLineWidth(rawValue: number): number {
+  const baseValue = rawValue <= 0 ? MIN_LINE_WIDTH : rawValue;
+  const precisionFactor = 10 ** LINE_WIDTH_DECIMAL_PLACES;
+  return Math.round(baseValue * precisionFactor) / precisionFactor;
+}
+
+function formatLineWidthDisplay(value: number): string {
+  const normalized = clampLineWidth(value);
+  return normalized.toFixed(LINE_WIDTH_DECIMAL_PLACES).replace(/\.?0+$/, '');
+}
 
 async function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
@@ -125,16 +165,22 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
     const y1 = (line.start.y / 100) * height;
     const x2 = (line.end.x / 100) * width;
     const y2 = (line.end.y / 100) * height;
+    const controlX = line.controlPoint ? (line.controlPoint.x / 100) * width : null;
+    const controlY = line.controlPoint ? (line.controlPoint.y / 100) * height : null;
 
-    const strokeWidthPx = Math.max(1, line.strokeWidth * averageScale);
+    const normalizedStrokeWidth = Math.max(MIN_LINE_WIDTH, line.strokeWidth);
+    const strokeWidthPx = normalizedStrokeWidth * averageScale;
 
     return {
       x1,
       y1,
       x2,
       y2,
+      controlX,
+      controlY,
       strokeColor: line.strokeColor,
       strokeWidth: strokeWidthPx,
+      endCap: line.endCap ?? 'line',
     };
   });
 
@@ -281,10 +327,14 @@ function mapShapeTypeToObjectType(shape: LineShapeType | null): RenderObjectInpu
 export default function Home() {
   const [color, setColor] = useState('#ffffff');
   const [shapeColor, setShapeColor] = useState('#ffffff');
-  const [lineWidth, setLineWidth] = useState(1);
+  const [lineWidth, setLineWidth] = useState(() => clampLineWidth(1));
+  const [lineWidthInputValue, setLineWidthInputValue] = useState(() =>
+    formatLineWidthDisplay(1),
+  );
   const [shape, setShape] = useState<LineShapeType | null>(null);
   const [shapeCount, setShapeCount] = useState('1');
   const [isShapeAnimationEnabled, setIsShapeAnimationEnabled] = useState(true);
+  const [lineEndCap, setLineEndCap] = useState<LineEndCap>('line');
   const [canvasWidth, setCanvasWidth] = useState('1080');
   const [canvasHeight, setCanvasHeight] = useState('1080');
   const colorInputRef = useRef<HTMLInputElement>(null);
@@ -304,6 +354,7 @@ export default function Home() {
     draftLine,
     selectedLine,
     selectedLineId,
+    hoveredLineId,
     setSelectedLineId,
     handleSurfacePointerDown,
     handleSurfacePointerMove,
@@ -313,6 +364,8 @@ export default function Home() {
     handleLinePointerMove,
     handleLinePointerUp,
     handleLinePointerCancel,
+    handleLinePointerEnter,
+    handleLinePointerLeave,
     undoLastLine,
     updateSelectedLineProperties,
     updateDraftLine,
@@ -325,7 +378,10 @@ export default function Home() {
 
     setColor(selectedLine.strokeColor.toUpperCase());
     setShapeColor(selectedLine.shapeColor.toUpperCase());
-    setLineWidth(selectedLine.strokeWidth);
+    const normalizedWidth = clampLineWidth(selectedLine.strokeWidth);
+    setLineWidth(normalizedWidth);
+    setLineWidthInputValue(formatLineWidthDisplay(normalizedWidth));
+    setLineEndCap(selectedLine.endCap ?? 'line');
   }, [selectedLine]);
 
   useEffect(() => {
@@ -347,6 +403,7 @@ export default function Home() {
       setShape(null);
       setShapeCount('1');
       setIsShapeAnimationEnabled(true);
+      setLineEndCap('line');
       return;
     }
 
@@ -354,6 +411,7 @@ export default function Home() {
     setShapeCount(String(selectedLine.shapeCount));
     setIsShapeAnimationEnabled(selectedLine.animateShapes);
     setShapeColor(selectedLine.shapeColor.toUpperCase());
+    setLineEndCap(selectedLine.endCap ?? 'line');
   }, [selectedLine]);
 
   const openColorPicker = () => {
@@ -394,22 +452,54 @@ export default function Home() {
     updateSelectedLineProperties({ shapeColor: nextColor });
   };
 
-  const applyLineWidth = useCallback(
-    (rawValue: number) => {
-      if (!Number.isFinite(rawValue)) return;
-      const normalized = rawValue <= 0 ? 1 : Math.floor(rawValue);
-      setLineWidth(normalized);
+  const syncLineWidthState = useCallback((value: number) => {
+    const normalized = clampLineWidth(value);
+    setLineWidth(normalized);
+    setLineWidthInputValue(formatLineWidthDisplay(normalized));
+    return normalized;
+  }, []);
+
+  const commitLineWidth = useCallback(
+    (value: number) => {
+      const normalized = syncLineWidthState(value);
       updateSelectedLineProperties({ strokeWidth: normalized });
     },
-    [updateSelectedLineProperties],
+    [syncLineWidthState, updateSelectedLineProperties],
   );
 
   const handleLineWidthChange = (event: ChangeEvent<HTMLInputElement>) => {
-    applyLineWidth(Number(event.target.value));
+    const nextValue = event.target.value;
+    setLineWidthInputValue(nextValue);
+
+    if (nextValue.trim() === '') {
+      return;
+    }
+
+    const parsed = Number(nextValue);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+
+    if (parsed <= 0) {
+      const normalized = clampLineWidth(MIN_LINE_WIDTH);
+      setLineWidth(normalized);
+      updateSelectedLineProperties({ strokeWidth: normalized });
+      return;
+    }
+
+    const normalized = clampLineWidth(parsed);
+    setLineWidth(normalized);
+    updateSelectedLineProperties({ strokeWidth: normalized });
   };
 
   const normalizeLineWidth = () => {
-    applyLineWidth(lineWidth);
+    const parsed = Number(lineWidthInputValue);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      commitLineWidth(MIN_LINE_WIDTH);
+      return;
+    }
+
+    commitLineWidth(parsed);
   };
 
   const handleShapeCountChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -527,6 +617,15 @@ export default function Home() {
     const resolvedShape = shape === nextShape ? null : nextShape;
     setShape(resolvedShape);
     updateSelectedLineProperties({ shapeType: resolvedShape });
+  };
+
+  const handleSelectLineEndCap = (nextEndCap: LineEndCap) => {
+    if (!selectedLine) {
+      return;
+    }
+
+    setLineEndCap(nextEndCap);
+    updateSelectedLineProperties({ endCap: nextEndCap });
   };
 
   const handleToggleShapeAnimation = () => {
@@ -662,6 +761,7 @@ export default function Home() {
           lines={lines}
           draftLine={draftLine}
           selectedLineId={selectedLineId}
+          hoveredLineId={hoveredLineId}
           drawingSurfaceRef={drawingSurfaceRef}
           onSurfacePointerDown={handleSurfacePointerDown}
           onSurfacePointerMove={handleSurfacePointerMove}
@@ -671,6 +771,8 @@ export default function Home() {
           onLinePointerMove={handleLinePointerMove}
           onLinePointerUp={handleLinePointerUp}
           onLinePointerCancel={handleLinePointerCancel}
+          onLinePointerEnter={handleLinePointerEnter}
+          onLinePointerLeave={handleLinePointerLeave}
           background={canvasBackground}
         >
           <ToolSelector activeTool={tool} onSelect={handleToolSelect} />
@@ -679,11 +781,12 @@ export default function Home() {
         <ShapeControls
           color={color}
           shapeColor={shapeColor}
-          lineWidth={lineWidth}
+          lineWidthValue={lineWidthInputValue}
           shape={shape}
           shapeCount={shapeCount}
           canvasWidth={canvasWidth}
           canvasHeight={canvasHeight}
+          lineEndCap={lineEndCap}
           colorInputRef={colorInputRef}
           shapeColorInputRef={shapeColorInputRef}
           onOpenColorPicker={openColorPicker}
@@ -702,6 +805,7 @@ export default function Home() {
           isShapeColorDisabled={!selectedLine || !shape}
           isAnimationEnabled={isShapeAnimationEnabled}
           onToggleAnimation={handleToggleShapeAnimation}
+          onSelectLineEndCap={handleSelectLineEndCap}
           onRequestUpload={handleRequestUpload}
           onRequestDownload={handleRequestDownload}
           isDownloadInProgress={isExporting}

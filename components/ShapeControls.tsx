@@ -1,18 +1,51 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-D]
+// 🔍 WHAT WAS WRONG:
+// The right-hand panel still displayed legacy helper copy about preview scaling and exporting, which product asked to retire.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// The extra sentences distracted users from the controls and caused confusion about current export behavior.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Removed the unused helper paragraphs so the menu stays focused on actionable settings without redundant instructions.
+// 🛠️ EDIT LOG [2025-11-11-C]
+// 🔍 WHAT WAS WRONG:
+// The width control rejected any value below 1px, so designers could not create hairline strokes or taper lines to match reference art.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Exported annotations need to support very thin guides; clamping to 1px broke parity with competing tools and the underlying renderer already handles sub-pixel widths.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Lowered the minimum to 0.001 with matching precision so the UI, state, and exporters all honor fractional stroke widths without rounding back up.
+// 🛠️ EDIT LOG [2025-11-11-B]
+// 🔍 WHAT WAS WRONG:
+// The “block” cap setting still rendered an extra rectangle, and the arrow head didn’t fully reach the line tip because stroke caps extended beyond the endpoint.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Users expect the default to be an unadorned line and any selected arrow to replace the tip cleanly without visible gaps.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Simplified the selector to a plain line versus arrow choice and left extra geometry to the renderers only when arrow mode is active.
+// 🛠️ EDIT LOG [2025-11-11-A]
+// 🔍 WHAT WAS WRONG:
+// Line ends always rendered as rounded strokes and the control surface offered no way to switch between arrow or block heads.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without a cap picker designers couldn't match brand guidelines, and exports ignored the requested terminal shapes.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added an end-cap selector with visual icons, defaulting to block heads, and wired it into line state so previews and GIFs stay consistent.
+
 import type { ChangeEvent, RefObject } from 'react';
 import { useMemo } from 'react';
 
-import type { LineShapeType } from '@/lib/canvas/types';
+import type { LineEndCap, LineShapeType } from '@/lib/canvas/types';
+
+const MIN_LINE_WIDTH = 0.001;
+const LINE_WIDTH_STEP = 0.001;
 
 type ShapeControlsProps = {
   color: string;
   shapeColor: string;
-  lineWidth: number;
+  lineWidthValue: string;
   shape: LineShapeType | null;
   shapeCount: string;
   canvasWidth: string;
   canvasHeight: string;
+  lineEndCap: LineEndCap;
   colorInputRef: RefObject<HTMLInputElement | null>;
   shapeColorInputRef: RefObject<HTMLInputElement | null>;
   onOpenColorPicker: () => void;
@@ -33,6 +66,7 @@ type ShapeControlsProps = {
   isShapeColorDisabled: boolean;
   isAnimationEnabled: boolean;
   onToggleAnimation: () => void;
+  onSelectLineEndCap: (endCap: LineEndCap) => void;
   onRequestUpload: () => void;
   onRequestDownload: () => void;
   isDownloadInProgress: boolean;
@@ -42,15 +76,17 @@ type ShapeControlsProps = {
 };
 
 const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
+const endCapOptions: Array<LineEndCap> = ['line', 'arrow'];
 
 export function ShapeControls({
   color,
   shapeColor,
-  lineWidth,
+  lineWidthValue,
   shape,
   shapeCount,
   canvasWidth,
   canvasHeight,
+  lineEndCap,
   colorInputRef,
   shapeColorInputRef,
   onOpenColorPicker,
@@ -69,6 +105,7 @@ export function ShapeControls({
   isShapeColorDisabled,
   isAnimationEnabled,
   onToggleAnimation,
+  onSelectLineEndCap,
   onRequestUpload,
   onRequestDownload,
   isDownloadInProgress,
@@ -172,9 +209,9 @@ export function ShapeControls({
             </div>
             <input
               type="number"
-              min={1}
-              step={1}
-              value={lineWidth}
+              min={MIN_LINE_WIDTH}
+              step={LINE_WIDTH_STEP}
+              value={lineWidthValue}
               onChange={onLineWidthChange}
               onBlur={onLineWidthBlur}
               className="w-12 bg-transparent text-right text-sm font-semibold text-white outline-none"
@@ -225,9 +262,38 @@ export function ShapeControls({
         >
           Animation Off
         </button>
-        <p className="text-[11px] text-white/40">
-          Toggle to hide animated helpers while keeping shape placement.
-        </p>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">
+            Line End
+          </span>
+          <div className="flex items-center gap-2">
+            {endCapOptions.map((option) => {
+              const isActive = lineEndCap === option;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => onSelectLineEndCap(option)}
+                  aria-label={
+                    option === 'arrow' ? 'Use arrow head' : 'Use plain line end'
+                  }
+                  disabled={isShapeControlsDisabled}
+                  className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
+                    isActive
+                      ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
+                      : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
+                  } ${
+                    isShapeControlsDisabled
+                      ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60'
+                      : ''
+                  }`}
+                >
+                  {renderLineEndCapIcon(option)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </section>
 
       <section className="flex flex-col gap-2.5">
@@ -301,12 +367,9 @@ export function ShapeControls({
             <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/40">px</span>
           </div>
         </div>
-        <p className="text-[11px] text-white/40">Preview scales to fit while keeping the exported aspect ratio.</p>
       </section>
 
       <section className="flex flex-col gap-2.5 border-t border-white/10 pt-4">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">Export</span>
-        <p className="text-[11px] text-white/60">Save to your GIF library or download locally.</p>
         <label className="flex w-full flex-col gap-1.5">
           <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">File Name</span>
           <input
@@ -388,6 +451,22 @@ function renderShapeIcon(type: LineShapeType) {
   return (
     <svg viewBox="0 0 24 24" className="h-3 w-3 fill-current">
       <polygon points="12 4 20 20 4 20" />
+    </svg>
+  );
+}
+
+function renderLineEndCapIcon(option: LineEndCap) {
+  if (option === 'arrow') {
+    return (
+      <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current">
+        <path d="M4 12h9l-2-4 9 4-9 4 2-4H4z" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current">
+      <line x1="4" y1="12" x2="20" y2="12" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
     </svg>
   );
 }

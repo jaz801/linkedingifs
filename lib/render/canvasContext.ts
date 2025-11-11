@@ -1,9 +1,18 @@
+// 🛠️ EDIT LOG [2025-11-11-B]
+// 🔍 WHAT WAS WRONG:
+// The fallback renderer's context exposed `quadraticCurveTo` at runtime, but our TypeScript shim forgot to declare it.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without the method in the type, shared helpers could not safely detect support and the compiler blocked the curved-line fallback.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Declare the optional signature so both browser canvases and the PureImage shim advertise curve support consistently.
+
 export type CanvasLikeContext = {
   save(): void;
   restore(): void;
   beginPath(): void;
   moveTo(x: number, y: number): void;
   lineTo(x: number, y: number): void;
+  quadraticCurveTo?(cpx: number, cpy: number, x: number, y: number): void;
   stroke(): void;
   strokeStyle: string;
   lineWidth: number;

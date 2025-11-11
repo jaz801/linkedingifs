@@ -1,5 +1,27 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-C]
+// 🔍 WHAT WAS WRONG:
+// Arrow heads rendered short of the line’s true endpoint because round caps extended the stroke, and the “block” option still added geometry users didn’t want.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Teams expect the default to be a plain line and the arrow variant to snap cleanly to the tip without a visible gap.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Default new lines to the renamed `line` cap and let downstream renderers decide when to add arrow geometry, eliminating unintended caps.
+// 🛠️ EDIT LOG [2025-11-11-B]
+// 🔍 WHAT WAS WRONG:
+// Newly drawn lines defaulted to rounded tips and there was no way to persist an arrow/block selection, so caps reset between edits and exports.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Artists need consistent terminal markers; losing the cap choice every time a line is created or selected broke the new annotation workflow.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Capture the end-cap preference on line creation and expose it through the shared updater so UI controls and exporters stay in sync.
+// 🛠️ EDIT LOG [2025-11-11-A]
+// 🔍 WHAT WAS WRONG:
+// Arrow mode offered no resize or curve handles, so adjusting a finished line required deleting it and redrawing from scratch.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Rework sessions involve nudging endpoints onto precise anchors and bending strokes to follow artwork; forcing a redraw wasted time and broke alignment.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added hover-aware handles plus endpoint and midpoint drag logic backed by control-point math, so artists can stretch or curve existing lines directly.
+
 // 🛠️ EDIT LOG [2025-11-10-A]
 // 🔍 WHAT WAS WRONG:
 // The Delete/Backspace keyboard shortcut always removed the active line, even when the user was typing inside form inputs such as the export filename.
@@ -26,13 +48,14 @@ type UseLinesManagerOptions = {
   shapeColor: string;
 };
 
-type LinePointerHandler = (event: ReactPointerEvent<SVGLineElement>) => void;
+type LinePointerHandler = (event: ReactPointerEvent<SVGElement>) => void;
 type SurfacePointerHandler = (event: ReactPointerEvent<HTMLDivElement>) => void;
 
 export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManagerOptions) {
   const drawingSurfaceRef = useRef<HTMLDivElement>(null);
   const [lines, setLines] = useState<LineSegment[]>([]);
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
+  const [hoveredLineId, setHoveredLineId] = useState<string | null>(null);
   const [draftLine, setDraftLine] = useState<DraftLine | null>(null);
   const draftLineRef = useRef<DraftLine | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
@@ -91,6 +114,9 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
 
         return currentSelectedId;
       });
+      setHoveredLineId((currentHoveredId) =>
+        removedLine && currentHoveredId === removedLine.id ? null : currentHoveredId,
+      );
 
       return nextLines;
     });
@@ -119,9 +145,11 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
         name: `Line ${nextCount}`,
         start: current.start,
         end: finalEnd,
+        controlPoint: null,
         stackOrder: nextCount,
         strokeColor: color.toUpperCase(),
         strokeWidth: lineWidth,
+        endCap: 'line',
         shapeColor: shapeColor.toUpperCase(),
         shapeType: null,
         shapeCount: 1,
@@ -216,7 +244,10 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       const lineId = event.currentTarget.dataset.lineId;
       if (!lineId) return;
 
+      const targetHandle = (event.currentTarget.dataset.handleKind as DragState['kind']) ?? 'translate';
+
       setSelectedLineId(lineId);
+      setHoveredLineId(lineId);
 
       const pointerPoint = getRelativePoint(event);
       const line = lines.find((existing) => existing.id === lineId);
@@ -225,9 +256,11 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       dragStateRef.current = {
         lineId,
         pointerId: event.pointerId,
+        kind: targetHandle,
         pointerStart: pointerPoint,
         lineStart: line.start,
         lineEnd: line.end,
+        controlPoint: line.controlPoint,
       };
 
       const target = event.currentTarget;
@@ -246,39 +279,105 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       event.preventDefault();
 
       const nextPointer = getRelativePoint(event);
-      const clampDelta = (delta: number, startValue: number, endValue: number) => {
-        const minDelta = Math.max(-startValue, -endValue);
-        const maxDelta = Math.min(100 - startValue, 100 - endValue);
-        return Math.min(Math.max(delta, minDelta), maxDelta);
-      };
+      if (dragState.kind === 'translate') {
+        const baseXValues = [dragState.lineStart.x, dragState.lineEnd.x];
+        const baseYValues = [dragState.lineStart.y, dragState.lineEnd.y];
+        if (dragState.controlPoint) {
+          baseXValues.push(dragState.controlPoint.x);
+          baseYValues.push(dragState.controlPoint.y);
+        }
 
-      let deltaX = nextPointer.x - dragState.pointerStart.x;
-      let deltaY = nextPointer.y - dragState.pointerStart.y;
-      deltaX = clampDelta(deltaX, dragState.lineStart.x, dragState.lineEnd.x);
-      deltaY = clampDelta(deltaY, dragState.lineStart.y, dragState.lineEnd.y);
+        const clampDelta = (delta: number, baseValues: number[]) => {
+          if (baseValues.length === 0) {
+            return delta;
+          }
+          const minDelta = Math.max(...baseValues.map((value) => -value));
+          const maxDelta = Math.min(...baseValues.map((value) => 100 - value));
+          return Math.min(Math.max(delta, minDelta), maxDelta);
+        };
 
-      setLines((prevLines) =>
-        prevLines.map((existing) =>
-          existing.id === dragState.lineId
-            ? {
-                ...existing,
-                start: {
-                  x: dragState.lineStart.x + deltaX,
-                  y: dragState.lineStart.y + deltaY,
-                },
-                end: {
-                  x: dragState.lineEnd.x + deltaX,
-                  y: dragState.lineEnd.y + deltaY,
-                },
-              }
-            : existing,
-        ),
-      );
+        let deltaX = nextPointer.x - dragState.pointerStart.x;
+        let deltaY = nextPointer.y - dragState.pointerStart.y;
+        deltaX = clampDelta(deltaX, baseXValues);
+        deltaY = clampDelta(deltaY, baseYValues);
+
+        setLines((prevLines) =>
+          prevLines.map((existing) =>
+            existing.id === dragState.lineId
+              ? {
+                  ...existing,
+                  start: {
+                    x: dragState.lineStart.x + deltaX,
+                    y: dragState.lineStart.y + deltaY,
+                  },
+                  end: {
+                    x: dragState.lineEnd.x + deltaX,
+                    y: dragState.lineEnd.y + deltaY,
+                  },
+                  controlPoint: existing.controlPoint
+                    ? {
+                        x: existing.controlPoint.x + deltaX,
+                        y: existing.controlPoint.y + deltaY,
+                      }
+                    : dragState.controlPoint
+                      ? {
+                          x: dragState.controlPoint.x + deltaX,
+                          y: dragState.controlPoint.y + deltaY,
+                        }
+                      : null,
+                }
+              : existing,
+          ),
+        );
+        return;
+      }
+
+      if (dragState.kind === 'start') {
+        setLines((prevLines) =>
+          prevLines.map((existing) =>
+            existing.id === dragState.lineId
+              ? {
+                  ...existing,
+                  start: nextPointer,
+                }
+              : existing,
+          ),
+        );
+        return;
+      }
+
+      if (dragState.kind === 'end') {
+        setLines((prevLines) =>
+          prevLines.map((existing) =>
+            existing.id === dragState.lineId
+              ? {
+                  ...existing,
+                  end: nextPointer,
+                }
+              : existing,
+          ),
+        );
+        return;
+      }
+
+      if (dragState.kind === 'control') {
+        dragState.controlPoint = nextPointer;
+        setLines((prevLines) =>
+          prevLines.map((existing) =>
+            existing.id === dragState.lineId
+              ? {
+                  ...existing,
+                  controlPoint: nextPointer,
+                }
+              : existing,
+          ),
+        );
+      }
     },
     [getRelativePoint],
   );
 
-  const releasePointerCapture = useCallback((event: ReactPointerEvent<SVGLineElement>) => {
+  const releasePointerCapture = useCallback((event: ReactPointerEvent<SVGElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -307,6 +406,23 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
     [releasePointerCapture],
   );
 
+  const handleLinePointerEnter = useCallback((lineId: string | null) => {
+    if (lineId === null) {
+      setHoveredLineId(null);
+    } else {
+      setHoveredLineId(lineId);
+    }
+  }, []);
+
+  const handleLinePointerLeave = useCallback((lineId: string) => {
+    setHoveredLineId((current) => {
+      if (dragStateRef.current && dragStateRef.current.lineId === lineId) {
+        return current;
+      }
+      return current === lineId ? null : current;
+    });
+  }, []);
+
   const updateSelectedLineProperties = useCallback(
     (
       next: Partial<
@@ -314,6 +430,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
           LineSegment,
           | 'strokeColor'
           | 'strokeWidth'
+          | 'endCap'
           | 'shapeType'
           | 'shapeCount'
           | 'animateShapes'
@@ -375,6 +492,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
 
       setLines((prev) => prev.filter((line) => line.id !== selectedLineId));
       setSelectedLineId(null);
+      setHoveredLineId((currentHoveredId) => (currentHoveredId === selectedLineId ? null : currentHoveredId));
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -388,6 +506,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
     draftLine,
     selectedLine,
     selectedLineId,
+    hoveredLineId,
     setSelectedLineId,
     handleSurfacePointerDown,
     handleSurfacePointerMove,
@@ -397,6 +516,8 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
     handleLinePointerMove,
     handleLinePointerUp,
     handleLinePointerCancel,
+    handleLinePointerEnter,
+    handleLinePointerLeave,
     undoLastLine,
     updateDraftLine,
     updateSelectedLineProperties,
