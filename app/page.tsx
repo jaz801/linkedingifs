@@ -1,5 +1,19 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-K]
+// 🔍 WHAT WAS WRONG:
+// The line-width control reformatted inputs with commas, which broke the stepper arrows and kept values like “0,5” from sticking.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers need to nudge widths below 1 quickly; if the spinner can’t adjust by tenths and comma input fails, thin strokes stay stuck at 1px.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Keep the field in canonical dot notation so the stepper works, while still accepting commas by normalizing them before parsing and clamping to positive values.
+// 🛠️ EDIT LOG [2025-11-11-J]
+// 🔍 WHAT WAS WRONG:
+// Localized browsers reported line widths like “0,5”, so our parser treated them as NaN, snapped the state back to 0.001, and the spinner stopped working.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Artists in comma locales couldn’t dial in hairline strokes; every attempt to drop below 1 reset the value and destabilized selected lines.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Normalize decimal separators before parsing, defer updates until the value is positive, and format the field with the user’s locale so any number above 0—except 0 itself—sticks.
 // 🛠️ EDIT LOG [2025-11-11-I]
 // 🔍 WHAT WAS WRONG:
 // The progress bar hit 100% as soon as encoding finished, but the browser still needed a few seconds to download the GIF, leaving users staring at “Wrapping up…”.
@@ -113,6 +127,15 @@
 //   - #3 on 2025-11-11 [Export snapshots reused control-point references; fixed with deep clone]
 // 🚨 Next steps:
 // Add component-level tests to lock in the new boundaries and prevent future regressions.
+// 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2 — Line Width Controls]
+// 🧠 ERROR TYPE: Line width UI regressions
+// 📂 FILE: app/page.tsx
+// 🧾 HISTORY: This issue has now occurred 3 times in this project.
+//   - #1 on 2025-11-11 [Line widths were clamped to whole-pixel values of 1 or greater; enabled fractional support]
+//   - #2 on 2025-11-11 [Locale decimal parsing reset fractional widths; normalized comma inputs]
+//   - #3 on 2025-11-11 [Locale formatting broke steppers; reverted to dot syntax while still accepting commas]
+// 🚨 Next steps:
+// Add acceptance tests that cover both dot and comma decimal scenarios.
 
 import type { ChangeEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -139,8 +162,8 @@ const supportedImageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/jpg',
 const DEFAULT_EXPORT_DURATION_SECONDS = 2.8;
 const DEFAULT_EXPORT_FPS = 30;
 const FALLBACK_BACKGROUND_COLOR = '#0C0A09';
-const MIN_LINE_WIDTH = 0.001;
-const LINE_WIDTH_DECIMAL_PLACES = 3;
+const MIN_LINE_WIDTH = 0.1;
+const LINE_WIDTH_DECIMAL_PLACES = 1;
 
 function clampLineWidth(rawValue: number): number {
   const baseValue = rawValue <= 0 ? MIN_LINE_WIDTH : rawValue;
@@ -397,6 +420,16 @@ export default function Home() {
   const transferStartedAtRef = useRef<number | null>(null);
   const lastTransferDurationRef = useRef<number>(1200);
   const currentProcessingMsRef = useRef<number | null>(null);
+
+  const parseLineWidthInput = useCallback((rawValue: string): number | null => {
+    if (rawValue.trim() === '') {
+      return null;
+    }
+
+    const sanitized = rawValue.replace(/\s+/g, '').replace(/,/g, '.');
+    const parsed = Number(sanitized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }, []);
 
   const {
     drawingSurfaceRef,
@@ -730,34 +763,28 @@ export default function Home() {
     [syncLineWidthState, updateSelectedLineProperties],
   );
 
-  const handleLineWidthChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const nextValue = event.target.value;
-    setLineWidthInputValue(nextValue);
+  const handleLineWidthChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const nextValue = event.target.value;
+      const sanitizedForDisplay = nextValue.replace(/,/g, '.');
+      setLineWidthInputValue(sanitizedForDisplay);
 
-    if (nextValue.trim() === '') {
-      return;
-    }
+      const parsed = parseLineWidthInput(nextValue);
+      if (parsed === null) {
+        return;
+      }
 
-    const parsed = Number(nextValue);
-    if (!Number.isFinite(parsed)) {
-      return;
-    }
-
-    if (parsed <= 0) {
-      const normalized = clampLineWidth(MIN_LINE_WIDTH);
+      const candidate = parsed <= 0 ? MIN_LINE_WIDTH : parsed;
+      const normalized = clampLineWidth(candidate);
       setLineWidth(normalized);
       updateSelectedLineProperties({ strokeWidth: normalized });
-      return;
-    }
-
-    const normalized = clampLineWidth(parsed);
-    setLineWidth(normalized);
-    updateSelectedLineProperties({ strokeWidth: normalized });
-  };
+    },
+    [parseLineWidthInput, updateSelectedLineProperties],
+  );
 
   const normalizeLineWidth = () => {
-    const parsed = Number(lineWidthInputValue);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
+    const parsed = parseLineWidthInput(lineWidthInputValue);
+    if (parsed === null || parsed <= 0) {
       commitLineWidth(MIN_LINE_WIDTH);
       return;
     }

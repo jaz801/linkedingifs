@@ -1,5 +1,20 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-G]
+// 🔍 WHAT WAS WRONG:
+// Dragging lines rebuilt the entire layer array on every pointer move, so pointer updates turned into O(n) work even when only one layer changed.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// That per-move cloning caused frame drops once the canvas held dozens of annotations, making line adjustments feel sluggish.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Track the active line index and clamp bounds inside the drag state so moves can patch a single array slot and skip redundant equality work.
+// 🛠️ EDIT LOG [2025-11-11-F]
+// 🔍 WHAT WAS WRONG:
+// Paste (Cmd+V) updated the clipboard reference with the offset duplicate, so subsequent pastes chained off the last clone instead of the original copy.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers expect multiple pastes to reproduce the item they copied, not progressively shifted versions, otherwise alignment drifts with each paste.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Keep the clipboard snapshot immutable during paste by only mutating it on copy; paste now just inserts the offset duplicate while preserving the original buffer.
+
 // 🛠️ EDIT LOG [2025-11-11-E]
 // 🔍 WHAT WAS WRONG:
 // Dragging a curved line by its body kept stacking the movement delta onto the control point, warping the arc.
@@ -55,7 +70,13 @@
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { DragState, DraftLine, LinePoint, LineSegment } from '@/lib/canvas/types';
+import type {
+  DragState,
+  DraftLine,
+  LinePoint,
+  LineSegment,
+  TranslateBounds,
+} from '@/lib/canvas/types';
 
 type UseLinesManagerOptions = {
   color: string;
@@ -65,6 +86,37 @@ type UseLinesManagerOptions = {
 
 type LinePointerHandler = (event: ReactPointerEvent<SVGElement>) => void;
 type SurfacePointerHandler = (event: ReactPointerEvent<HTMLDivElement>) => void;
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const computeTranslateBounds = (line: LineSegment): TranslateBounds => {
+  const xValues = [line.start.x, line.end.x];
+  const yValues = [line.start.y, line.end.y];
+  if (line.controlPoint) {
+    xValues.push(line.controlPoint.x);
+    yValues.push(line.controlPoint.y);
+  }
+
+  return {
+    minXDelta: Math.max(...xValues.map((value) => -value)),
+    maxXDelta: Math.min(...xValues.map((value) => 100 - value)),
+    minYDelta: Math.max(...yValues.map((value) => -value)),
+    maxYDelta: Math.min(...yValues.map((value) => 100 - value)),
+  };
+};
+
+const resolveDragLineIndex = (lines: LineSegment[], state: DragState) => {
+  const candidate = lines[state.lineIndex];
+  if (candidate && candidate.id === state.lineId) {
+    return state.lineIndex;
+  }
+
+  const fallbackIndex = lines.findIndex((line) => line.id === state.lineId);
+  if (fallbackIndex !== -1) {
+    state.lineIndex = fallbackIndex;
+  }
+  return fallbackIndex;
+};
 
 export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManagerOptions) {
   const drawingSurfaceRef = useRef<HTMLDivElement>(null);
@@ -266,8 +318,9 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       setHoveredLineId(lineId);
 
       const pointerPoint = getRelativePoint(event);
-      const line = lines.find((existing) => existing.id === lineId);
-      if (!line) return;
+      const lineIndex = lines.findIndex((existing) => existing.id === lineId);
+      if (lineIndex === -1) return;
+      const line = lines[lineIndex];
 
       dragStateRef.current = {
         lineId,
@@ -277,6 +330,8 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
         lineStart: line.start,
         lineEnd: line.end,
         controlPoint: line.controlPoint,
+        lineIndex,
+        translateBounds: targetHandle === 'translate' ? computeTranslateBounds(line) : null,
       };
 
       const target = event.currentTarget;
@@ -296,93 +351,131 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
 
       const nextPointer = getRelativePoint(event);
       if (dragState.kind === 'translate') {
-        const baseXValues = [dragState.lineStart.x, dragState.lineEnd.x];
-        const baseYValues = [dragState.lineStart.y, dragState.lineEnd.y];
-        if (dragState.controlPoint) {
-          baseXValues.push(dragState.controlPoint.x);
-          baseYValues.push(dragState.controlPoint.y);
-        }
+        const bounds = dragState.translateBounds;
+        const rawDeltaX = nextPointer.x - dragState.pointerStart.x;
+        const rawDeltaY = nextPointer.y - dragState.pointerStart.y;
+        const deltaX =
+          bounds !== null ? clamp(rawDeltaX, bounds.minXDelta, bounds.maxXDelta) : rawDeltaX;
+        const deltaY =
+          bounds !== null ? clamp(rawDeltaY, bounds.minYDelta, bounds.maxYDelta) : rawDeltaY;
 
-        const clampDelta = (delta: number, baseValues: number[]) => {
-          if (baseValues.length === 0) {
-            return delta;
+        setLines((prevLines) => {
+          const resolvedIndex = resolveDragLineIndex(prevLines, dragState);
+          if (resolvedIndex === -1) {
+            return prevLines;
           }
-          const minDelta = Math.max(...baseValues.map((value) => -value));
-          const maxDelta = Math.min(...baseValues.map((value) => 100 - value));
-          return Math.min(Math.max(delta, minDelta), maxDelta);
-        };
 
-        let deltaX = nextPointer.x - dragState.pointerStart.x;
-        let deltaY = nextPointer.y - dragState.pointerStart.y;
-        deltaX = clampDelta(deltaX, baseXValues);
-        deltaY = clampDelta(deltaY, baseYValues);
-
-        setLines((prevLines) =>
-          prevLines.map((existing) =>
-            existing.id === dragState.lineId
+          const existing = prevLines[resolvedIndex];
+          const nextLine: LineSegment = {
+            ...existing,
+            start: {
+              x: dragState.lineStart.x + deltaX,
+              y: dragState.lineStart.y + deltaY,
+            },
+            end: {
+              x: dragState.lineEnd.x + deltaX,
+              y: dragState.lineEnd.y + deltaY,
+            },
+            controlPoint: dragState.controlPoint
               ? {
-                  ...existing,
-                  start: {
-                    x: dragState.lineStart.x + deltaX,
-                    y: dragState.lineStart.y + deltaY,
-                  },
-                  end: {
-                    x: dragState.lineEnd.x + deltaX,
-                    y: dragState.lineEnd.y + deltaY,
-                  },
-                  controlPoint: dragState.controlPoint
-                    ? {
-                        x: dragState.controlPoint.x + deltaX,
-                        y: dragState.controlPoint.y + deltaY,
-                      }
-                    : null,
+                  x: dragState.controlPoint.x + deltaX,
+                  y: dragState.controlPoint.y + deltaY,
                 }
-              : existing,
-          ),
-        );
+              : null,
+          };
+
+          const controlPointChanged =
+            (existing.controlPoint === null && nextLine.controlPoint !== null) ||
+            (existing.controlPoint !== null &&
+              nextLine.controlPoint !== null &&
+              (existing.controlPoint.x !== nextLine.controlPoint.x ||
+                existing.controlPoint.y !== nextLine.controlPoint.y));
+
+          if (
+            existing.start.x === nextLine.start.x &&
+            existing.start.y === nextLine.start.y &&
+            existing.end.x === nextLine.end.x &&
+            existing.end.y === nextLine.end.y &&
+            !controlPointChanged
+          ) {
+            return prevLines;
+          }
+
+          const nextLines = prevLines.slice();
+          nextLines[resolvedIndex] = nextLine;
+          return nextLines;
+        });
         return;
       }
 
       if (dragState.kind === 'start') {
-        setLines((prevLines) =>
-          prevLines.map((existing) =>
-            existing.id === dragState.lineId
-              ? {
-                  ...existing,
-                  start: nextPointer,
-                }
-              : existing,
-          ),
-        );
+        setLines((prevLines) => {
+          const resolvedIndex = resolveDragLineIndex(prevLines, dragState);
+          if (resolvedIndex === -1) {
+            return prevLines;
+          }
+
+          const existing = prevLines[resolvedIndex];
+          if (existing.start.x === nextPointer.x && existing.start.y === nextPointer.y) {
+            return prevLines;
+          }
+
+          const nextLines = prevLines.slice();
+          nextLines[resolvedIndex] = {
+            ...existing,
+            start: { ...nextPointer },
+          };
+          return nextLines;
+        });
         return;
       }
 
       if (dragState.kind === 'end') {
-        setLines((prevLines) =>
-          prevLines.map((existing) =>
-            existing.id === dragState.lineId
-              ? {
-                  ...existing,
-                  end: nextPointer,
-                }
-              : existing,
-          ),
-        );
+        setLines((prevLines) => {
+          const resolvedIndex = resolveDragLineIndex(prevLines, dragState);
+          if (resolvedIndex === -1) {
+            return prevLines;
+          }
+
+          const existing = prevLines[resolvedIndex];
+          if (existing.end.x === nextPointer.x && existing.end.y === nextPointer.y) {
+            return prevLines;
+          }
+
+          const nextLines = prevLines.slice();
+          nextLines[resolvedIndex] = {
+            ...existing,
+            end: { ...nextPointer },
+          };
+          return nextLines;
+        });
         return;
       }
 
       if (dragState.kind === 'control') {
-        dragState.controlPoint = nextPointer;
-        setLines((prevLines) =>
-          prevLines.map((existing) =>
-            existing.id === dragState.lineId
-              ? {
-                  ...existing,
-                  controlPoint: nextPointer,
-                }
-              : existing,
-          ),
-        );
+        dragState.controlPoint = { ...nextPointer };
+        setLines((prevLines) => {
+          const resolvedIndex = resolveDragLineIndex(prevLines, dragState);
+          if (resolvedIndex === -1) {
+            return prevLines;
+          }
+
+          const existing = prevLines[resolvedIndex];
+          if (
+            existing.controlPoint &&
+            existing.controlPoint.x === nextPointer.x &&
+            existing.controlPoint.y === nextPointer.y
+          ) {
+            return prevLines;
+          }
+
+          const nextLines = prevLines.slice();
+          nextLines[resolvedIndex] = {
+            ...existing,
+            controlPoint: { ...nextPointer },
+          };
+          return nextLines;
+        });
       }
     },
     [getRelativePoint],
@@ -559,13 +652,6 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
           start: offsetPoint(copied.start)!,
           end: offsetPoint(copied.end)!,
           controlPoint: offsetPoint(copied.controlPoint),
-        };
-
-        clipboardLineRef.current = {
-          ...nextLine,
-          start: { ...nextLine.start },
-          end: { ...nextLine.end },
-          controlPoint: nextLine.controlPoint ? { ...nextLine.controlPoint } : null,
         };
 
         setLines((prev) => [...prev, nextLine]);

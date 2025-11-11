@@ -1,5 +1,19 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-I]
+// 🔍 WHAT WAS WRONG:
+// The stepper still jumped in whole numbers and allowed over-precise entries, so aiming for widths like 0.5 required retyping and often snapped back to 1.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers primarily need tenths under 1; without predictable 0.1 increments, thin strokes remained out of reach.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Tightened the minimum and step to 0.1 so the arrows land on 0.1–0.9 reliably while still blocking zero and negative widths.
+// 🛠️ EDIT LOG [2025-11-11-H]
+// 🔍 WHAT WAS WRONG:
+// The number field ignored localized decimals, so typing “0,5” or using the spin buttons failed to update the line width.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers in comma locales rely on those controls to enter sub-pixel strokes; blocking them left fractional widths unusable.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Let the input surface any locale-friendly text while the parent sanitizes it, and hint decimal input so the spinner and keyboard paths both work.
 // 🛠️ EDIT LOG [2025-11-11-G]
 // 🔍 WHAT WAS WRONG:
 // The export rail showed a determinate bar, but it still idled at “Wrapping up…” while the browser streamed the GIF, so the UI lied about completion.
@@ -50,13 +64,23 @@
 // ✅ WHY THIS SOLUTION WAS PICKED:
 // Added an end-cap selector with visual icons, defaulting to block heads, and wired it into line state so previews and GIFs stay consistent.
 
+// 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2 — Line Width Controls]
+// 🧠 ERROR TYPE: Line width UI regressions
+// 📂 FILE: components/ShapeControls.tsx
+// 🧾 HISTORY: This issue has now occurred 3 times in this project.
+//   - #1 on 2025-11-11 [Line width control rejected values below 1px; lowered the minimum to 0.001]
+//   - #2 on 2025-11-11 [Localized decimals were ignored; hinted decimal input so commas pass through]
+//   - #3 on 2025-11-11 [Stepper jumped by integers; tightened step to 0.1 for reliable thin widths]
+// 🚨 Next steps:
+// Cover locale-specific inputs in component tests to prevent future regressions.
+
 import type { ChangeEvent, RefObject } from 'react';
 import { useMemo } from 'react';
 
 import type { LineEndCap, LineShapeType } from '@/lib/canvas/types';
 
-const MIN_LINE_WIDTH = 0.001;
-const LINE_WIDTH_STEP = 0.001;
+const MIN_LINE_WIDTH = 0.1;
+const LINE_WIDTH_STEP = 0.1;
 
 type ShapeControlsProps = {
   color: string;
@@ -242,6 +266,7 @@ export function ShapeControls({
               value={lineWidthValue}
               onChange={onLineWidthChange}
               onBlur={onLineWidthBlur}
+              inputMode="decimal"
               className="w-12 bg-transparent text-right text-sm font-semibold text-white outline-none"
             />
           </div>

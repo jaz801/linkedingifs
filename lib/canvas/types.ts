@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-D]
+// 🔍 WHAT WAS WRONG:
+// Drag handlers recalculated layer lookups and movement bounds on every pointer move, so translating one line scanned the whole stack each frame.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Those per-move array walks stack up with dozens of annotations and caused noticeable pointer lag on larger canvases.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Cache the active index plus translation clamps inside the drag state so move events can patch the target line in constant time.
 // 🛠️ EDIT LOG [2025-11-11-C]
 // 🔍 WHAT WAS WRONG:
 // The so-called block head still rendered a capped tip and arrow heads sat a few pixels short of the actual endpoint thanks to rounded line caps.
@@ -51,6 +58,13 @@ export type DraftLine = {
   isShiftLocked: boolean;
 };
 
+export type TranslateBounds = {
+  minXDelta: number;
+  maxXDelta: number;
+  minYDelta: number;
+  maxYDelta: number;
+};
+
 export type DragState = {
   lineId: string;
   pointerId: number;
@@ -59,5 +73,7 @@ export type DragState = {
   lineStart: LinePoint;
   lineEnd: LinePoint;
   controlPoint: LinePoint | null;
+  lineIndex: number;
+  translateBounds: TranslateBounds | null;
 };
 
