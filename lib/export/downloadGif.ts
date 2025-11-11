@@ -1,3 +1,11 @@
+// 🛠️ EDIT LOG [2025-11-11-G]
+// 🔍 WHAT WAS WRONG:
+// Render requests finished silently, so QA could not confirm when the server succeeded or why it failed without digging through network panels.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// When the render server is under load, support needs immediate console signal to differentiate “in-flight” renders from API failures.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added structured console logging around the render call so successes and failures surface directly in the browser without altering telemetry flows.
+
 import type { RenderGifPayload } from '@/lib/render/schema';
 
 type RenderGifError = Error & {
@@ -12,6 +20,13 @@ type DownloadGifOptions = {
 };
 
 export async function downloadGIF(animationData: RenderGifPayload, options: DownloadGifOptions = {}) {
+  console.info('[render-gif] Requesting GIF render', {
+    width: animationData.width,
+    height: animationData.height,
+    lineCount: animationData.lines.length,
+    objectCount: animationData.objects.length,
+  });
+
   const response = await fetch('/api/render-gif', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -50,6 +65,13 @@ export async function downloadGIF(animationData: RenderGifPayload, options: Down
       error.cause = cause;
     }
 
+    console.error('[render-gif] Render failed', {
+      status: response.status,
+      message: error.message,
+      errorId,
+      requestId,
+    });
+
     throw error;
   }
 
@@ -64,6 +86,12 @@ export async function downloadGIF(animationData: RenderGifPayload, options: Down
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
+
+    console.info('[render-gif] Render completed', {
+      status: response.status,
+      filename,
+      blobSize: blob.size,
+    });
   } finally {
     URL.revokeObjectURL(url);
   }
