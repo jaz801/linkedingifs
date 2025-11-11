@@ -1,5 +1,20 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-E]
+// 🔍 WHAT WAS WRONG:
+// Dragging a curved line by its body kept stacking the movement delta onto the control point, warping the arc.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Repositioning should preserve existing curvature so annotations stay faithful when nudged into place.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Base translate math on the pointer-down snapshot so start, end, and control points travel together without compounding.
+
+// 🛠️ EDIT LOG [2025-11-11-D]
+// 🔍 WHAT WAS WRONG:
+// Command+C and Command+V did nothing on selected annotations, forcing teams to redraw lines to duplicate them.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Recreating identical callouts slowed iteration and introduced spacing errors when designers needed multiple matching arrows.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added clipboard-aware shortcuts that respect focusable elements, clone the selected line, and paste a bounded offset copy so duplicates appear instantly.
 // 🛠️ EDIT LOG [2025-11-11-C]
 // 🔍 WHAT WAS WRONG:
 // Arrow heads rendered short of the line’s true endpoint because round caps extended the stroke, and the “block” option still added geometry users didn’t want.
@@ -60,6 +75,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
   const draftLineRef = useRef<DraftLine | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
   const lineCounterRef = useRef(0);
+  const clipboardLineRef = useRef<LineSegment | null>(null);
 
   const updateDraftLine = useCallback((next: DraftLine | null) => {
     draftLineRef.current = next;
@@ -314,17 +330,12 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
                     x: dragState.lineEnd.x + deltaX,
                     y: dragState.lineEnd.y + deltaY,
                   },
-                  controlPoint: existing.controlPoint
+                  controlPoint: dragState.controlPoint
                     ? {
-                        x: existing.controlPoint.x + deltaX,
-                        y: existing.controlPoint.y + deltaY,
+                        x: dragState.controlPoint.x + deltaX,
+                        y: dragState.controlPoint.y + deltaY,
                       }
-                    : dragState.controlPoint
-                      ? {
-                          x: dragState.controlPoint.x + deltaX,
-                          y: dragState.controlPoint.y + deltaY,
-                        }
-                      : null,
+                    : null,
                 }
               : existing,
           ),
@@ -454,8 +465,6 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
   );
 
   useEffect(() => {
-    if (!selectedLineId) return;
-
     const isEditableElement = (element: EventTarget | null): element is HTMLElement => {
       if (!element || !(element instanceof HTMLElement)) {
         return false;
@@ -475,11 +484,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' && event.key !== 'Backspace') {
-        return;
-      }
-
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) {
+      if (event.defaultPrevented) {
         return;
       }
 
@@ -490,14 +495,88 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
         return;
       }
 
-      setLines((prev) => prev.filter((line) => line.id !== selectedLineId));
-      setSelectedLineId(null);
-      setHoveredLineId((currentHoveredId) => (currentHoveredId === selectedLineId ? null : currentHoveredId));
+      const metaOnly = event.metaKey && !event.ctrlKey && !event.altKey;
+      const key = event.key.toLowerCase();
+
+      if ((event.key === 'Delete' || event.key === 'Backspace') && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (!selectedLineId) {
+          return;
+        }
+        event.preventDefault();
+        setLines((prev) => prev.filter((line) => line.id !== selectedLineId));
+        setSelectedLineId(null);
+        setHoveredLineId((currentHoveredId) => (currentHoveredId === selectedLineId ? null : currentHoveredId));
+        return;
+      }
+
+      if (metaOnly && key === 'c') {
+        if (!selectedLine) {
+          return;
+        }
+        event.preventDefault();
+        clipboardLineRef.current = {
+          ...selectedLine,
+          start: { ...selectedLine.start },
+          end: { ...selectedLine.end },
+          controlPoint: selectedLine.controlPoint ? { ...selectedLine.controlPoint } : null,
+        };
+        return;
+      }
+
+      if (metaOnly && key === 'v') {
+        const copied = clipboardLineRef.current;
+        if (!copied) {
+          return;
+        }
+        event.preventDefault();
+        const delta = 3;
+        const shiftWithinBounds = (value: number) => {
+          const grow = value + delta;
+          if (grow <= 100) {
+            return grow;
+          }
+          const shrink = value - delta;
+          return shrink >= 0 ? shrink : value;
+        };
+
+        const offsetPoint = (point: LinePoint | null): LinePoint | null => {
+          if (!point) {
+            return null;
+          }
+          return {
+            x: shiftWithinBounds(point.x),
+            y: shiftWithinBounds(point.y),
+          };
+        };
+
+        lineCounterRef.current += 1;
+        const nextOrder = lineCounterRef.current;
+        const nextLine: LineSegment = {
+          ...copied,
+          id: `line-${nextOrder}`,
+          name: `Line ${nextOrder}`,
+          stackOrder: nextOrder,
+          start: offsetPoint(copied.start)!,
+          end: offsetPoint(copied.end)!,
+          controlPoint: offsetPoint(copied.controlPoint),
+        };
+
+        clipboardLineRef.current = {
+          ...nextLine,
+          start: { ...nextLine.start },
+          end: { ...nextLine.end },
+          controlPoint: nextLine.controlPoint ? { ...nextLine.controlPoint } : null,
+        };
+
+        setLines((prev) => [...prev, nextLine]);
+        setSelectedLineId(nextLine.id);
+        setHoveredLineId(nextLine.id);
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedLineId]);
+  }, [selectedLineId, selectedLine]);
 
   return {
     drawingSurfaceRef,
