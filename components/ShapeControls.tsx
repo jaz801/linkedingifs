@@ -1,5 +1,12 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-E]
+// 🔍 WHAT WAS WRONG:
+// The export rail still claimed PNG-only backgrounds and failed to confirm that downloads respect the canvas dimensions, causing confusion about JPEG support and output sizing.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers routinely upload JPG/JPEG references and need confidence that the exported GIF matches their configured width and height to avoid rework.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Updated the helper copy so the UI accurately lists the supported formats and reinforces that exports stay locked to the current canvas size.
 // 🛠️ EDIT LOG [2025-11-11-D]
 // 🔍 WHAT WAS WRONG:
 // The right-hand panel still displayed legacy helper copy about preview scaling and exporting, which product asked to retire.
@@ -425,7 +432,9 @@ export function ShapeControls({
             {uploadNotice}
           </p>
         ) : null}
-        <p className="text-[11px] text-white/40">Supports PNG backgrounds only.</p>
+        <p className="text-[11px] text-white/40">
+          Supports PNG, JPG, or JPEG backgrounds. GIF exports match your current canvas dimensions.
+        </p>
       </section>
     </aside>
   );

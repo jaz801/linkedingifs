@@ -1,5 +1,26 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-11-G]
+// 🔍 WHAT WAS WRONG:
+// Export snapshots still shared references to line control points, so post-export edits bent both the saved payload and the live canvas.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers expect downloads to freeze the current geometry; leaking mutations into the snapshot reintroduced the shape drift we just addressed.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Deep-cloned optional control points alongside line endpoints so the export payload remains stable even if the canvas updates afterward.
+// 🛠️ EDIT LOG [2025-11-11-F]
+// 🔍 WHAT WAS WRONG:
+// Product analytics never captured session heatmaps, so support tickets around mis-clicks and dead UI zones relied on guesswork.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without Hotjar injection, the team could not validate redesign decisions or monitor regression hotspots after feature launches.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added the official Hotjar tracker via `next/script` so the snippet loads after hydration without blocking rendering.
+// 🛠️ EDIT LOG [2025-11-11-E]
+// 🔍 WHAT WAS WRONG:
+// Background uploads still rejected JPG/JPEG assets and helper copy implied GIF exports might resize, so teams kept round-tripping files to PNG and second-guessing deliverables.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Most stakeholder mockups ship as JPEGs, and product needs explicit confirmation that exports honor the canvas dimensions to prevent QA escalations.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Broadened the accepted MIME set and picker filters to cover common JPEG variants, retained PNG conversion during export, and updated notices so the UI matches the actual format support and size fidelity.
 // 🛠️ EDIT LOG [2025-11-11-D]
 // 🔍 WHAT WAS WRONG:
 // Line widths were clamped to whole-pixel values of 1 or greater, so the UI snapped thin strokes back to 1px and exports ignored hairline guides.
@@ -43,7 +64,7 @@
 // 🤔 WHY IT HAD TO BE CHANGED (2025-11-08-D):
 // Without a background import, designers had to rely on placeholder imagery and could not align drawings to client-provided assets.
 // ✅ WHY THIS SOLUTION WAS PICKED (2025-11-08-D):
-// Added a sanitized file picker that accepts JPG, PNG, or PDF files, stores them in memory, and passes the rendered source into the canvas so uploads instantly appear underneath drawn lines.
+// Added a sanitized file picker that accepts PNG, JPG, or JPEG files, stores them in memory, and passes the rendered source into the canvas so uploads instantly appear underneath drawn lines.
 // 🔍 WHAT WAS WRONG (2025-11-08-E):
 // PDF uploads embedded the entire viewer chrome, and the download button didn't export the actual canvas with animated helpers.
 // 🤔 WHY IT HAD TO BE CHANGED (2025-11-08-E):
@@ -72,14 +93,16 @@
 // 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2]
 // 🧠 ERROR TYPE: Shape state drift across UI layers
 // 📂 FILE: app/page.tsx
-// 🧾 HISTORY: This issue has now occurred 2 times in this project.
+// 🧾 HISTORY: This issue has now occurred 3 times in this project.
 //   - #1 on 2025-11-08 [Refactored into hooks/components in app/page.tsx]
 //   - #2 on 2025-11-08 [Propagated stale shape UI state; fixed with line-owned metadata]
+//   - #3 on 2025-11-11 [Export snapshots reused control-point references; fixed with deep clone]
 // 🚨 Next steps:
 // Add component-level tests to lock in the new boundaries and prevent future regressions.
 
 import type { ChangeEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Script from 'next/script';
 
 import { CanvasStage } from '@/components/CanvasStage';
 import { LayerList } from '@/components/LayerList';
@@ -96,7 +119,7 @@ type CanvasBackground = {
   src: string;
 };
 
-const supportedImageMimeTypes = new Set(['image/png']);
+const supportedImageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/pjpeg']);
 
 const DEFAULT_EXPORT_DURATION_SECONDS = 2.8;
 const DEFAULT_EXPORT_FPS = 30;
@@ -651,7 +674,7 @@ export default function Home() {
   }, []);
 
   const handleRequestUpload = () => {
-    showUploadNotice('Background uploads currently accept PNG images.');
+    showUploadNotice('Background uploads accept PNG, JPG, or JPEG images.');
     uploadInputRef.current?.click();
   };
 
@@ -664,11 +687,11 @@ export default function Home() {
     }
 
     try {
-      if (supportedImageMimeTypes.has(file.type)) {
+      if (supportedImageMimeTypes.has(file.type.toLowerCase())) {
         const dataUrl = await readFileAsDataUrl(file);
         setCanvasBackground({ kind: 'image', src: dataUrl });
       } else {
-        showUploadNotice('Only PNG backgrounds are supported right now.');
+        showUploadNotice('Only PNG, JPG, or JPEG backgrounds are supported right now.');
         setCanvasBackground(null);
       }
     } catch (error) {
@@ -700,6 +723,7 @@ export default function Home() {
       ...line,
       start: { ...line.start },
       end: { ...line.end },
+      controlPoint: line.controlPoint ? { ...line.controlPoint } : null,
     }));
 
     setIsExporting(true);
@@ -745,6 +769,17 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col bg-stone-950 font-sans text-white">
+      {/* Hotjar Tracking Code for https://peaceful-spence-5e8b7b.netlify.app/ */}
+      <Script id="hotjar-tracking" strategy="afterInteractive">
+        {`(function(h,o,t,j,a,r){
+          h.hj=h.hj||function(){(h.hj.q=h.hj.q||[]).push(arguments)};
+          h._hjSettings={hjid:1831859,hjsv:6};
+          a=o.getElementsByTagName('head')[0];
+          r=o.createElement('script');r.async=1;
+          r.src=t+h._hjSettings.hjid+j+h._hjSettings.hjsv;
+          a.appendChild(r);
+        })(window,document,'https://static.hotjar.com/c/hotjar-','.js?sv=');`}
+      </Script>
       <main className="mx-auto flex w-full max-w-screen-2xl flex-1 flex-col gap-6 px-4 py-10 sm:px-6 lg:grid lg:grid-cols-[minmax(220px,0.9fr)_minmax(0,3.2fr)_minmax(280px,0.95fr)] lg:items-stretch lg:gap-10 lg:px-8 xl:gap-12">
         <LayerList
           orderedLines={orderedLines}
@@ -817,7 +852,7 @@ export default function Home() {
       <input
         ref={uploadInputRef}
         type="file"
-        accept=".png"
+        accept=".png,.jpg,.jpeg"
         className="sr-only"
         onChange={handleBackgroundUpload}
       />

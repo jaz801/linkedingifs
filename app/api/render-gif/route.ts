@@ -1,3 +1,10 @@
+// 🛠️ EDIT LOG [2025-11-11-J]
+// 🔍 WHAT WAS WRONG:
+// We lacked hard numbers for decode, draw, and encode timings, making it risky to optimise without a baseline and risking regressions in GIF fidelity.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without structured metrics we could not prove that new caching and dedupe strategies preserved performance expectations or spot new hotspots quickly.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Instrumented the render pipeline with timing metrics reported alongside success logs so every export surfaces decode/draw/encode durations without altering visual output.
 // 🛠️ EDIT LOG [2025-11-11-I]
 // 🔍 WHAT WAS WRONG:
 // The route owned the encoder helper outright, so we still lacked reusable coverage and kept re-learning the frame contract.
@@ -150,6 +157,15 @@ type Canvas2DContext = CanvasInstance extends { getContext(type: '2d'): infer C 
  * Next.js runs the frontend and backend together when you execute `npm run dev`;
  * this route lives inside the same dev server, so no separate backend process is required.
  */
+type RenderTimingMetrics = {
+  decodeMs: number;
+  drawMs: number;
+  enqueueMs: number;
+  finalizeMs: number;
+  totalFrames: number;
+  skippedFrames: number;
+};
+
 export async function POST(request: Request) {
   const requestId = createServerEventId('render_gif');
   const startedAt = performance.now();
@@ -163,13 +179,21 @@ export async function POST(request: Request) {
     const summary = summarizePayload(payload);
     payloadSummary = summary;
 
-    const buffer = await renderGif(payload);
+    const { buffer, metrics } = await renderGif(payload);
     const responseBody = toArrayBuffer(buffer);
 
     logServerMessage('info', 'render-gif:success', {
       requestId,
       durationMs: Number((performance.now() - startedAt).toFixed(2)),
       ...summary,
+      timings: {
+        decodeMs: Number(metrics.decodeMs.toFixed(2)),
+        drawMs: Number(metrics.drawMs.toFixed(2)),
+        enqueueMs: Number(metrics.enqueueMs.toFixed(2)),
+        finalizeMs: Number(metrics.finalizeMs.toFixed(2)),
+        totalFrames: metrics.totalFrames,
+        skippedFrames: metrics.skippedFrames,
+      },
     });
 
     return new NextResponse(responseBody, {
@@ -221,7 +245,10 @@ function validatePayload(payload: RenderGifPayload) {
   }
 }
 
-async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
+async function renderGif(payload: RenderGifPayload): Promise<{
+  buffer: Buffer;
+  metrics: RenderTimingMetrics;
+}> {
   const { width, height, background, duration, lines, objects } = payload;
   const fps = sanitizeFps(payload.fps);
   const durationMs = Math.max(0, Math.round(duration * 1000));
@@ -232,26 +259,45 @@ async function renderGif(payload: RenderGifPayload): Promise<Buffer> {
   const canvasBindings = loadCanvasBindings();
   const { createCanvas, loadImage } = canvasBindings;
 
+  const timings: RenderTimingMetrics = {
+    decodeMs: 0,
+    drawMs: 0,
+    enqueueMs: 0,
+    finalizeMs: 0,
+    totalFrames,
+    skippedFrames: 0,
+  };
+
+  const decodeStartedAt = performance.now();
   const backgroundImage = await loadImage(background);
+  timings.decodeMs = performance.now() - decodeStartedAt;
+
   const canvas = createCanvas(width, height);
   const context = getContext2d(canvas);
 
   const { encoder, completion } = createGifEncoder(width, height, delayMs);
 
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+    const frameStartedAt = performance.now();
     clearFrame(context, width, height);
     drawBackground(context, backgroundImage, width, height);
 
     drawLines(context, lines);
     drawObjects(context, objects, lines, frameIndex, totalFrames);
+    timings.drawMs += performance.now() - frameStartedAt;
 
     const frame = context.getImageData(0, 0, width, height);
+    const enqueueStartedAt = performance.now();
     addFrameToEncoder(encoder, frame);
+    timings.enqueueMs += performance.now() - enqueueStartedAt;
   }
 
+  const finalizeStartedAt = performance.now();
   encoder.finish();
+  const buffer = await completion;
+  timings.finalizeMs = performance.now() - finalizeStartedAt;
 
-  return completion;
+  return { buffer, metrics: timings };
 }
 
 function loadCanvasBindings() {
