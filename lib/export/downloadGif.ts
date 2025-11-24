@@ -1,3 +1,28 @@
+import type { RenderGifPayload } from '@/lib/render/schema';
+import { recordDownloadMetric } from '@/lib/monitoring/renderMetricsClient';
+
+// 🛠️ EDIT LOG [2025-11-12-C]
+// 🔍 WHAT WAS WRONG:
+// Download timings from the snapshot and direct flows only surfaced via console logs, so we could not compare processing vs transfer durations across sessions.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// To hit the 3-second target we need structured telemetry that records which strategy ran and how long each phase took.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Capture the totals inside the shared response consumer and persist them through the render metrics helper, adding the strategy and payload hints for later analysis.
+// 🛠️ EDIT LOG [2025-11-12-B]
+// 🔍 WHAT WAS WRONG:
+// Snapshot downloads failed outright when the cache missed, forcing a manual retry even though the POST route still worked.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without a graceful fallback, the new background renderer felt broken whenever users clicked before the cache finished.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Attempt the cached GET first and reuse the streaming logic for a POST fallback so downloads always complete while keeping accurate progress updates.
+
+// 🛠️ EDIT LOG [2025-11-12-A]
+// 🔍 WHAT WAS WRONG:
+// The downloader still POSTed the entire render payload and waited for the backend to encode on demand, so the new snapshot cache provided no benefit.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// With auto-rendering in place we need to stream the cached GIF directly by session ID, keeping the progress bar while skipping redundant work.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Switched the helper to GET the prepared snapshot, reusing the streaming progress logic and exposing cached timing headers for the UI.
 // 🛠️ EDIT LOG [2025-11-11-J]
 // 🔍 WHAT WAS WRONG:
 // TypeScript blocked the build because streaming chunks inferred as Uint8Array<ArrayBufferLike> were not accepted as BlobParts.
@@ -27,8 +52,6 @@
 // ✅ WHY THIS SOLUTION WAS PICKED:
 // Added structured console logging around the render call so successes and failures surface directly in the browser without altering telemetry flows.
 
-import type { RenderGifPayload } from '@/lib/render/schema';
-
 type RenderGifError = Error & {
   status?: number;
   errorId?: string;
@@ -36,9 +59,17 @@ type RenderGifError = Error & {
   cause?: unknown;
 };
 
-type DownloadGifOptions = {
+type DownloadGifBaseOptions = {
   filename?: string;
   onProgress?: (update: DownloadGifProgressUpdate) => void;
+};
+
+type DownloadGifFromSnapshotOptions = DownloadGifBaseOptions & {
+  sessionId: string;
+};
+
+type DownloadGifOnDemandOptions = DownloadGifBaseOptions & {
+  payload: RenderGifPayload;
 };
 
 export type DownloadGifProgressUpdate =
@@ -61,74 +92,92 @@ export type DownloadGifProgressUpdate =
       totalDurationMs: number;
     };
 
-export async function downloadGIF(
-  animationData: RenderGifPayload,
-  options: DownloadGifOptions = {},
-): Promise<{
+export type DownloadGifResult = {
   processingMs: number | null;
   responseDurationMs: number;
   blobSize: number;
   transferDurationMs: number | null;
   totalBytes: number | null;
   totalDurationMs: number;
-}> {
+};
+
+export async function downloadGifFromSnapshot({
+  sessionId,
+  filename,
+  onProgress,
+}: DownloadGifFromSnapshotOptions): Promise<DownloadGifResult> {
   const requestStartedAt = performance.now();
 
-  console.info('[render-gif] Requesting GIF render', {
-    width: animationData.width,
-    height: animationData.height,
-    lineCount: animationData.lines.length,
-    objectCount: animationData.objects.length,
+  console.info('[render-gif] Fetching prepared GIF', { sessionId });
+
+  const response = await fetch(`/api/render-gif?sessionId=${encodeURIComponent(sessionId)}`, {
+    method: 'GET',
   });
+
+  if (!response.ok) {
+    throw await buildRenderGifError(response, 'snapshot');
+  }
+
+  return consumeGifResponse(response, {
+    filename,
+    onProgress,
+    requestStartedAt,
+    strategy: 'snapshot',
+    sessionId,
+    context: {
+      headers: pickTimingHeaders(response.headers),
+    },
+  });
+}
+
+export async function downloadGifOnDemand({
+  payload,
+  filename,
+  onProgress,
+}: DownloadGifOnDemandOptions): Promise<DownloadGifResult> {
+  const requestStartedAt = performance.now();
+
+  console.info('[render-gif] Rendering GIF on demand');
 
   const response = await fetch('/api/render-gif', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(animationData),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
-    let message = 'Failed to render GIF.';
-    let errorId: string | undefined;
-    let requestId: string | undefined;
-    let cause: unknown | undefined;
-    try {
-      const errorBody = await response.json();
-      cause = errorBody;
-      if (typeof errorBody?.message === 'string') {
-        message = errorBody.message;
-      }
-      if (typeof errorBody?.errorId === 'string') {
-        errorId = errorBody.errorId;
-      }
-      if (typeof errorBody?.requestId === 'string') {
-        requestId = errorBody.requestId;
-      }
-    } catch {
-      // ignore parsing failure and bubble generic message
-    }
-
-    const error = new Error(message) as RenderGifError;
-    error.name = 'RenderGifError';
-    error.status = response.status;
-    error.errorId = errorId;
-    if (requestId) {
-      error.requestId = requestId;
-    }
-    if (cause !== undefined) {
-      error.cause = cause;
-    }
-
-    console.error('[render-gif] Render failed', {
-      status: response.status,
-      message: error.message,
-      errorId,
-      requestId,
-    });
-
-    throw error;
+    throw await buildRenderGifError(response, 'direct');
   }
 
+  return consumeGifResponse(response, {
+    filename,
+    onProgress,
+    requestStartedAt,
+    strategy: 'direct',
+    sessionId: null,
+    context: {
+      headers: pickTimingHeaders(response.headers),
+      lineCount: Array.isArray(payload.lines) ? payload.lines.length : null,
+      objectCount: Array.isArray(payload.objects) ? payload.objects.length : null,
+      width: payload.width,
+      height: payload.height,
+    },
+  });
+}
+
+type ConsumeGifResponseOptions = {
+  filename?: string;
+  onProgress?: (update: DownloadGifProgressUpdate) => void;
+  requestStartedAt: number;
+  strategy: 'snapshot' | 'direct';
+  sessionId?: string | null;
+  context?: Record<string, unknown>;
+};
+
+async function consumeGifResponse(
+  response: Response,
+  { filename, onProgress, requestStartedAt, strategy, sessionId, context }: ConsumeGifResponseOptions,
+): Promise<DownloadGifResult> {
   const rawProcessingMs = response.headers.get('X-Render-Processing-Ms');
   const parsedProcessingMs =
     typeof rawProcessingMs === 'string' && rawProcessingMs.trim().length > 0
@@ -143,8 +192,8 @@ export async function downloadGIF(
       : Number.NaN;
   const totalBytes = Number.isFinite(parsedTotalBytes) && parsedTotalBytes > 0 ? parsedTotalBytes : null;
 
-  if (options.onProgress) {
-    options.onProgress({
+  if (onProgress) {
+    onProgress({
       phase: 'processing-complete',
       processingMs: Number.isFinite(parsedProcessingMs) ? parsedProcessingMs : null,
       elapsedMs: processingElapsedMs,
@@ -160,8 +209,8 @@ export async function downloadGIF(
     const blobParts: BlobPart[] = [];
     const transferStartedAt = performance.now();
 
-    if (options.onProgress) {
-      options.onProgress({
+    if (onProgress) {
+      onProgress({
         phase: 'transfer',
         transferredBytes,
         totalBytes,
@@ -178,8 +227,8 @@ export async function downloadGIF(
         blobParts.push(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
         transferredBytes += value.byteLength;
         const elapsed = performance.now() - transferStartedAt;
-        if (options.onProgress) {
-          options.onProgress({
+        if (onProgress) {
+          onProgress({
             phase: 'transfer',
             transferredBytes,
             totalBytes,
@@ -196,8 +245,8 @@ export async function downloadGIF(
     blob = await response.blob();
     transferDurationMs = performance.now() - transferStartedAt;
     transferredBytes = blob.size;
-    if (options.onProgress) {
-      options.onProgress({
+    if (onProgress) {
+      onProgress({
         phase: 'transfer',
         transferredBytes,
         totalBytes: blob.size,
@@ -209,8 +258,24 @@ export async function downloadGIF(
   const totalDurationMs = performance.now() - requestStartedAt;
   const resolvedTotalBytes = totalBytes ?? blob.size;
 
-  if (options.onProgress) {
-    options.onProgress({
+  recordDownloadMetric({
+    source: 'downloadGIF',
+    sessionId: sessionId ?? null,
+    filename: filename?.trim().length ? filename.trim() : 'animation.gif',
+    processingMs: Number.isFinite(parsedProcessingMs) ? parsedProcessingMs : null,
+    transferDurationMs,
+    totalDurationMs,
+    totalBytes: resolvedTotalBytes,
+    context: {
+      strategy,
+      blobSize: blob.size,
+      headers: pickTimingHeaders(response.headers),
+      ...context,
+    },
+  });
+
+  if (onProgress) {
+    onProgress({
       phase: 'complete',
       processingMs: Number.isFinite(parsedProcessingMs) ? parsedProcessingMs : null,
       transferDurationMs,
@@ -220,19 +285,20 @@ export async function downloadGIF(
   }
 
   const url = URL.createObjectURL(blob);
-  const filename = options.filename?.trim().length ? options.filename.trim() : 'animation.gif';
+  const resolvedFilename = filename?.trim().length ? filename.trim() : 'animation.gif';
 
   try {
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = filename;
+    anchor.download = resolvedFilename;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
 
     console.info('[render-gif] Render completed', {
+      strategy,
       status: response.status,
-      filename,
+      filename: resolvedFilename,
       blobSize: blob.size,
       processingMs: Number.isFinite(parsedProcessingMs) ? parsedProcessingMs : null,
       transferDurationMs,
@@ -249,6 +315,70 @@ export async function downloadGIF(
     transferDurationMs,
     totalBytes: resolvedTotalBytes,
     totalDurationMs,
+  };
+}
+
+async function buildRenderGifError(
+  response: Response,
+  strategy: 'snapshot' | 'direct',
+): Promise<RenderGifError> {
+  let message =
+    strategy === 'snapshot' ? 'Failed to fetch cached GIF.' : 'Failed to render GIF.';
+  let errorId: string | undefined;
+  let requestId: string | undefined;
+  let cause: unknown | undefined;
+
+  try {
+    const errorBody = await response.json();
+    cause = errorBody;
+    if (typeof errorBody?.message === 'string') {
+      message = errorBody.message;
+    }
+    if (typeof errorBody?.errorId === 'string') {
+      errorId = errorBody.errorId;
+    }
+    if (typeof errorBody?.requestId === 'string') {
+      requestId = errorBody.requestId;
+    }
+  } catch {
+    // ignore parsing failure and bubble generic message
+  }
+
+  const error = new Error(message) as RenderGifError;
+  error.name = 'RenderGifError';
+  error.status = response.status;
+  if (errorId) {
+    error.errorId = errorId;
+  }
+  if (requestId) {
+    error.requestId = requestId;
+  }
+  if (cause !== undefined) {
+    error.cause = cause;
+  }
+
+  console.error('[render-gif] Render failed', {
+    strategy,
+    status: response.status,
+    message: error.message,
+    errorId,
+    requestId,
+  });
+
+  return error;
+}
+
+function pickTimingHeaders(headers: Headers) {
+  const processing = headers.get('X-Render-Processing-Ms');
+  const revision = headers.get('X-Render-Revision');
+  const updatedAt = headers.get('X-Render-Updated-At');
+  const encodedFrames = headers.get('X-Render-Encoded-Frames');
+
+  return {
+    processingMs: processing ? Number.parseFloat(processing) : null,
+    revision: revision ? Number.parseInt(revision, 10) : null,
+    updatedAt: updatedAt ?? null,
+    encodedFrames: encodedFrames ? Number.parseInt(encodedFrames, 10) : null,
   };
 }
 

@@ -1,3 +1,17 @@
+// 🛠️ EDIT LOG [2025-11-12-B]
+// 🔍 WHAT WAS WRONG:
+// Every render decoded the background PNG and rebuilt line geometry from scratch, so identical snapshot revisions still spent milliseconds on setup.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Those redundant costs compounded across auto-renders and kept cached downloads from landing under the 3-second goal.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Memoize decoded backgrounds, reuse precomputed line geometry keyed by payload hashes, and tune the encoder for speed so repeat renders skip the heavy lifting.
+// 🛠️ EDIT LOG [2025-11-12-A]
+// 🔍 WHAT WAS WRONG:
+// The route still rendered GIFs on demand, so the new auto-render pipeline had no way to reuse cached snapshots when downloading.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without a GET handler tied to the snapshot store, every download repeated all rendering work, defeating the purpose of background encodes.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added a snapshot-aware GET endpoint while preserving the existing POST flow for direct renders, exposing revision metadata and cached timings to the client.
 // 🛠️ EDIT LOG [2025-11-11-K]
 // 🔍 WHAT WAS WRONG:
 // The frontend had no reliable timing signal from the encoder, so progress indicators guessed blindly and users had no idea when renders would finish.
@@ -145,21 +159,38 @@ import {
 import { getCanvasModule } from '@/lib/canvas/server';
 import type { CanvasLikeContext } from '@/lib/render/canvasContext';
 import {
-  approximateLineLength,
   computeArrowHeadDimensions,
   type ArrowHeadDimensions,
 } from '@/lib/render/arrowGeometry';
-import { addFrameToEncoder, normalizeFrameData } from './encoderUtils';
+import type { RenderTimingMetrics } from '@/lib/render/renderMetrics';
+import { fetchSnapshot } from '@/lib/render/snapshotStore';
+import { addFrameToEncoder, configureEncoderForFastRender, normalizeFrameData } from './encoderUtils';
 
 export const runtime = 'nodejs';
 
 const MIN_LINE_WIDTH = 0.001;
+const BACKGROUND_CACHE_LIMIT = 6;
+const PREPARED_LINES_CACHE_LIMIT = 32;
 
+type CanvasBindings = ReturnType<typeof getCanvasModule>;
 type CanvasFactory = ReturnType<typeof getCanvasModule>['createCanvas'];
 type CanvasInstance = ReturnType<CanvasFactory>;
 type Canvas2DContext = CanvasInstance extends { getContext(type: '2d'): infer C }
   ? C
   : CanvasLikeContext;
+type LoadImageFn = CanvasBindings['loadImage'];
+type LoadedImage = Awaited<ReturnType<LoadImageFn>>;
+
+type CachedBackgroundEntry = {
+  source: string;
+  image: LoadedImage;
+  lastUsed: number;
+};
+
+type PreparedLinesCacheEntry = {
+  prepared: PreparedRenderLine[];
+  lastUsed: number;
+};
 
 type PreparedRenderLine = {
   original: RenderLineInput;
@@ -171,19 +202,74 @@ type PreparedRenderLine = {
   tangentMagnitude: number;
 };
 
+const backgroundCache = new Map<string, CachedBackgroundEntry>();
+const preparedLinesCache = new Map<string, PreparedLinesCacheEntry>();
+
 /**
  * Next.js runs the frontend and backend together when you execute `npm run dev`;
  * this route lives inside the same dev server, so no separate backend process is required.
  */
-type RenderTimingMetrics = {
-  decodeMs: number;
-  drawMs: number;
-  enqueueMs: number;
-  finalizeMs: number;
-  totalFrames: number;
-  skippedFrames: number;
-  encodedFrames: number;
-};
+
+export async function GET(request: Request) {
+  const requestId = createServerEventId('render_gif_fetch');
+  try {
+    const url = new URL(request.url);
+    const sessionId = url.searchParams.get('sessionId');
+    if (!sessionId || sessionId.trim().length === 0) {
+      throw new Error('sessionId query parameter is required to fetch a cached GIF.');
+    }
+
+    const snapshot = await fetchSnapshot(sessionId.trim());
+    if (!snapshot) {
+      return NextResponse.json(
+        {
+          message: 'No prepared GIF is available for this session.',
+          requestId,
+        },
+        { status: 404 },
+      );
+    }
+
+    const { buffer, meta } = snapshot;
+    logServerMessage('info', 'render-gif:fetch-success', {
+      requestId,
+      sessionId,
+      revision: meta.revision,
+      payloadHash: meta.payloadHash,
+      encodedFrames: meta.metrics.encodedFrames,
+      contentLength: meta.contentLength,
+    });
+
+    return new NextResponse(toArrayBuffer(buffer), {
+      status: 200,
+      headers: {
+        'Content-Type': 'image/gif',
+        'Content-Disposition': 'attachment; filename="animation.gif"',
+        'Cache-Control': 'no-store',
+        'Content-Length': meta.contentLength.toString(),
+        'X-Render-Processing-Ms': meta.processingMs.toFixed(2),
+        'X-Render-Encoded-Frames': meta.metrics.encodedFrames.toString(),
+        'X-Render-Revision': meta.revision.toString(),
+        'X-Render-Updated-At': new Date(meta.updatedAt).toISOString(),
+      },
+    });
+  } catch (error) {
+    const { errorId, message } = reportServerError(error, {
+      hint: 'render-gif:fetch-failure',
+      context: {
+        requestId,
+      },
+    });
+    return NextResponse.json(
+      {
+        message,
+        errorId,
+        requestId,
+      },
+      { status: 400 },
+    );
+  }
+}
 
 export async function POST(request: Request) {
   const requestId = createServerEventId('render_gif');
@@ -249,7 +335,7 @@ export async function POST(request: Request) {
   }
 }
 
-function validatePayload(payload: RenderGifPayload) {
+export function validatePayload(payload: RenderGifPayload) {
   if (!payload || typeof payload !== 'object') {
     throw new Error('Invalid render payload.');
   }
@@ -295,7 +381,7 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
   };
 
   const decodeStartedAt = performance.now();
-  const backgroundImage = await loadImage(background);
+  const backgroundImage = await getCachedBackground(loadImage, background);
   timings.decodeMs = performance.now() - decodeStartedAt;
 
   const canvas = createCanvas(width, height);
@@ -303,7 +389,7 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
 
   const { encoder, completion } = createGifEncoder(width, height, delayMs);
 
-  const preparedLines = prepareRenderLines(Array.isArray(lines) ? lines : []);
+  const preparedLines = getPreparedRenderLines(Array.isArray(lines) ? lines : []);
   let pendingDelay = delayMs;
   let lastFrameSignature: string | null = null;
   let lastFrameBuffer: Buffer | null = null;
@@ -388,6 +474,76 @@ function prepareRenderLines(lines: RenderLineInput[]): PreparedRenderLine[] {
   });
 }
 
+function getCachedBackground(loadImage: LoadImageFn, source: string) {
+  const cacheKey = computeBackgroundCacheKey(source);
+  const cached = backgroundCache.get(cacheKey);
+  if (cached && cached.source === source) {
+    cached.lastUsed = Date.now();
+    return cached.image;
+  }
+
+  return loadImage(source).then((image) => {
+    backgroundCache.set(cacheKey, { source, image, lastUsed: Date.now() });
+    pruneCache(backgroundCache, BACKGROUND_CACHE_LIMIT);
+    return image;
+  });
+}
+
+function getPreparedRenderLines(lines: RenderLineInput[]): PreparedRenderLine[] {
+  if (!Array.isArray(lines) || lines.length === 0) {
+    return [];
+  }
+
+  const cacheKey = computeLinesCacheKey(lines);
+  const cached = preparedLinesCache.get(cacheKey);
+  if (cached) {
+    cached.lastUsed = Date.now();
+    return cached.prepared;
+  }
+
+  const prepared = prepareRenderLines(lines);
+  preparedLinesCache.set(cacheKey, { prepared, lastUsed: Date.now() });
+  pruneCache(preparedLinesCache, PREPARED_LINES_CACHE_LIMIT);
+  return prepared;
+}
+
+function computeBackgroundCacheKey(source: string) {
+  return createHash('sha1').update(source).digest('hex');
+}
+
+function computeLinesCacheKey(lines: RenderLineInput[]) {
+  const hash = createHash('sha1');
+  hash.update(String(lines.length));
+  lines.forEach((line) => {
+    hash.update(
+      [
+        line.x1,
+        line.y1,
+        line.x2,
+        line.y2,
+        line.controlX ?? '',
+        line.controlY ?? '',
+        line.strokeColor ?? '',
+        line.strokeWidth ?? '',
+        line.endCap ?? '',
+      ].join('|'),
+    );
+  });
+  return hash.digest('hex');
+}
+
+function pruneCache<K, V extends { lastUsed: number }>(cache: Map<K, V>, limit: number) {
+  if (cache.size <= limit) {
+    return;
+  }
+
+  const entries = [...cache.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+  while (cache.size > limit && entries.length > 0) {
+    const [key] = entries.shift()!;
+    cache.delete(key);
+  }
+}
+
 function loadCanvasBindings() {
   try {
     return getCanvasModule();
@@ -443,7 +599,7 @@ function createGifEncoder(
 
   encoder.setRepeat(0);
   encoder.setDelay(delayMs);
-  encoder.setQuality(10);
+  configureEncoderForFastRender(encoder);
   encoder.start();
 
   return { encoder, completion };

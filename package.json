@@ -13,9 +13,10 @@
     "run": "./bin/run.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.929.0",
     "gifencoder": "file:./vendor/gifencoder",
-    "pureimage": "^0.3.17",
     "next": "16.0.1",
+    "pureimage": "^0.3.17",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },
