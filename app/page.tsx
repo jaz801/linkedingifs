@@ -1,5 +1,58 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-24-A]
+// 🔍 WHAT WAS WRONG:
+// Exported GIFs stretched uploaded backgrounds to the requested canvas size, but the on-canvas preview uses `object-fit: cover`, so annotations drawn against cropped previews shifted when downloaded.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers expect exported frames to match what the stage shows; distorting the background breaks alignment and makes the download unreliable.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// When preparing the background PNG we now crop the source image using the same object-cover math as the preview before scaling it to the canvas dimensions, keeping exports and the live stage in sync.
+
+// 🛠️ EDIT LOG [2025-11-12-F]
+// 🔍 WHAT WAS WRONG:
+// Auto-render snapshots kept piling up whenever lines changed quickly, so the backend re-encoded every intermediate revision and “GIF ready” lagged by several seconds.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Designers expect cached downloads to land almost immediately after drawing; wasting time on stale renders makes the cache feel slower than the direct export path.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Abort in-flight snapshot requests before scheduling new ones, shorten the debounce, and keep the UI pending until the freshest revision stores so caching keeps up with fast edits.
+
+// 🛠️ EDIT LOG [2025-11-12-E]
+// 🔍 WHAT WAS WRONG:
+// Export timings only lived in ephemeral refs, so we had no telemetry proving whether cached downloads hit the 3-second goal or when we fell back to direct renders.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without persisted metrics we cannot benchmark snapshot readiness, transfer speed, or fallback frequency across sessions.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Record each download attempt with canvas context and strategy metadata via the shared render metrics helper so we can analyse performance trends over time.
+// 🛠️ EDIT LOG [2025-11-12-D]
+// 🔍 WHAT WAS WRONG:
+// The UI gave no confirmation when cached GIF snapshots finished rendering, so "instant" downloads felt inconsistent.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without readiness feedback designers kept clicking too early and assumed the background encoder wasn't helping.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Track snapshot state on the client, surface a "GIF ready" indicator, and treat cached downloads as complete immediately.
+
+// 🛠️ EDIT LOG [2025-11-12-C]
+// 🔍 WHAT WAS WRONG:
+// Hotjar's bootstrap script still ran on HTTP localhost, so the remote content bundle re-executed during Fast Refresh and tried to redefine its sealed tracking property.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// The duplicate bootstrap threw "Cannot redefine property" in the console, hiding real issues and making dev debugging harder.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Skip Hotjar when the origin is not HTTPS and guard against re-initializing the snippet so the tracker never double-registers during live reloads.
+
+// 🛠️ EDIT LOG [2025-11-12-B]
+// 🔍 WHAT WAS WRONG:
+// TypeScript failed the build because `parsedCanvasHeight` (and its width counterpart) appeared in a dependency array before either constant was declared.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// The temporal dead zone crash blocked production builds and prevented the background prefetch effect from ever running.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Hoisted the parsed canvas dimension constants above their first usage so the effect and scheduler share the same values without TDZ issues.
+// 🛠️ EDIT LOG [2025-11-12-A]
+// 🔍 WHAT WAS WRONG:
+// The download button still fired a fresh render and waited on the backend, so the new background encoder delivered no speed improvement.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// To make downloads instant we need to pre-render after every canvas change, push snapshots to the backend, and fetch the cached GIF instead of re-encoding.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Introduced an auto-snapshot loop that debounces canvas edits into backend renders, updates duration estimates from snapshot metrics, and downloads the cached GIF by session ID.
 // 🛠️ EDIT LOG [2025-11-11-K]
 // 🔍 WHAT WAS WRONG:
 // The line-width control reformatted inputs with commas, which broke the stepper arrows and kept values like “0,5” from sticking.
@@ -147,9 +200,11 @@ import { ShapeControls } from '@/components/ShapeControls';
 import { ToolSelector } from '@/components/ToolSelector';
 import { useLinesManager } from '@/hooks/useLinesManager';
 import type { LineEndCap, LineSegment, LineShapeType } from '@/lib/canvas/types';
-import { downloadGIF } from '@/lib/export/downloadGif';
+import { downloadGifFromSnapshot, downloadGifOnDemand } from '@/lib/export/downloadGif';
+import { prepareRenderSnapshot } from '@/lib/render/prepareSnapshot';
 import type { DownloadGifProgressUpdate } from '@/lib/export/downloadGif';
 import { bindGlobalErrorListeners, reportClientError } from '@/lib/monitoring/errorReporter';
+import { recordDownloadMetric } from '@/lib/monitoring/renderMetricsClient';
 import type { RenderGifPayload, RenderObjectInput } from '@/lib/render/schema';
 
 type CanvasBackground = {
@@ -164,6 +219,7 @@ const DEFAULT_EXPORT_FPS = 30;
 const FALLBACK_BACKGROUND_COLOR = '#0C0A09';
 const MIN_LINE_WIDTH = 0.1;
 const LINE_WIDTH_DECIMAL_PLACES = 1;
+const SNAPSHOT_DEBOUNCE_MS = 100;
 
 function clampLineWidth(rawValue: number): number {
   const baseValue = rawValue <= 0 ? MIN_LINE_WIDTH : rawValue;
@@ -284,6 +340,15 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
   };
 }
 
+function cloneLineSegments(lines: LineSegment[]) {
+  return lines.map((line) => ({
+    ...line,
+    start: { ...line.start },
+    end: { ...line.end },
+    controlPoint: line.controlPoint ? { ...line.controlPoint } : null,
+  }));
+}
+
 function extractServerErrorMeta(error: unknown): { errorId: string | null; requestId: string | null } {
   let errorId: string | null = null;
   let requestId: string | null = null;
@@ -325,6 +390,15 @@ function extractServerErrorMeta(error: unknown): { errorId: string | null; reque
   return { errorId, requestId };
 }
 
+function isSnapshotUnavailableError(error: unknown): error is { status: number } {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const status = (error as { status?: unknown }).status;
+  return typeof status === 'number' && (status === 404 || status === 409);
+}
+
 function buildExportFilename(input: string): string {
   const trimmed = input.trim();
   const withoutIllegalChars = trimmed.replace(/[\\/:*?"<>|]/g, '');
@@ -344,7 +418,30 @@ async function convertDataUrlToPng(dataUrl: string, width: number, height: numbe
     throw new Error('Unable to prepare background conversion canvas.');
   }
 
-  context.drawImage(image, 0, 0, width, height);
+  const sourceWidth = Math.max(1, image.naturalWidth || image.width || 0);
+  const sourceHeight = Math.max(1, image.naturalHeight || image.height || 0);
+  const targetWidth = Math.max(1, width);
+  const targetHeight = Math.max(1, height);
+
+  const imageAspect = sourceWidth / sourceHeight;
+  const targetAspect = targetWidth / targetHeight;
+
+  let sx = 0;
+  let sy = 0;
+  let sw = sourceWidth;
+  let sh = sourceHeight;
+
+  if (Number.isFinite(imageAspect) && Number.isFinite(targetAspect) && sourceWidth > 0 && sourceHeight > 0) {
+    if (imageAspect > targetAspect) {
+      sw = sourceHeight * targetAspect;
+      sx = (sourceWidth - sw) / 2;
+    } else if (imageAspect < targetAspect) {
+      sh = sourceWidth / targetAspect;
+      sy = (sourceHeight - sh) / 2;
+    }
+  }
+
+  context.drawImage(image, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
   return canvas.toDataURL('image/png');
 }
 
@@ -385,6 +482,26 @@ function mapShapeTypeToObjectType(shape: LineShapeType | null): RenderObjectInpu
   }
 }
 
+function isAbortError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const maybeName = (error as { name?: unknown }).name;
+  return typeof maybeName === 'string' && maybeName === 'AbortError';
+}
+
+function createRenderSessionId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const random = Math.random().toString(36).slice(2);
+  return `session-${random}-${Date.now()}`;
+}
+
+function smoothDurationEstimate(previous: number, sample: number) {
+  return Math.min(60000, previous * 0.4 + sample * 0.6);
+}
+
 export default function Home() {
   const [color, setColor] = useState('#ffffff');
   const [shapeColor, setShapeColor] = useState('#ffffff');
@@ -420,6 +537,41 @@ export default function Home() {
   const transferStartedAtRef = useRef<number | null>(null);
   const lastTransferDurationRef = useRef<number>(1200);
   const currentProcessingMsRef = useRef<number | null>(null);
+  const renderSessionIdRef = useRef<string>(createRenderSessionId());
+  const [preparedBackground, setPreparedBackground] = useState<string | null>(null);
+  const [snapshotState, setSnapshotState] = useState<'idle' | 'pending' | 'ready'>('idle');
+  const snapshotRevisionRef = useRef(0);
+  const lastStoredSnapshotRevisionRef = useRef(0);
+  const pendingSnapshotPromiseRef = useRef<Promise<void> | null>(null);
+  const pendingSnapshotRevisionRef = useRef<number | null>(null);
+  const snapshotAbortControllerRef = useRef<AbortController | null>(null);
+  const scheduledSnapshotTimeoutRef = useRef<number | null>(null);
+  const latestSnapshotPayloadRef = useRef<RenderGifPayload | null>(null);
+  const currentDownloadStrategyRef = useRef<'snapshot' | 'direct'>('snapshot');
+  const evaluateSnapshotState = useCallback(() => {
+    if (!preparedBackground) {
+      setSnapshotState('idle');
+      return;
+    }
+
+    const hasPendingTimer = scheduledSnapshotTimeoutRef.current !== null;
+    const hasPendingRequest = pendingSnapshotPromiseRef.current !== null;
+    const hasStoredLatest =
+      snapshotRevisionRef.current > 0 &&
+      lastStoredSnapshotRevisionRef.current >= snapshotRevisionRef.current;
+
+    if (hasStoredLatest && !hasPendingTimer && !hasPendingRequest) {
+      setSnapshotState('ready');
+      return;
+    }
+
+    if (hasPendingTimer || hasPendingRequest || snapshotRevisionRef.current > lastStoredSnapshotRevisionRef.current) {
+      setSnapshotState('pending');
+      return;
+    }
+
+    setSnapshotState('idle');
+  }, [preparedBackground]);
 
   const parseLineWidthInput = useCallback((rawValue: string): number | null => {
     if (rawValue.trim() === '') {
@@ -442,11 +594,11 @@ export default function Home() {
     setSelectedLineId,
     handleSurfacePointerDown,
     handleSurfacePointerMove,
-    handleSurfacePointerUp,
+    handleSurfacePointerUp: rawHandleSurfacePointerUp,
     handleSurfacePointerLeave,
     handleLinePointerDown,
     handleLinePointerMove,
-    handleLinePointerUp,
+    handleLinePointerUp: rawHandleLinePointerUp,
     handleLinePointerCancel,
     handleLinePointerEnter,
     handleLinePointerLeave,
@@ -585,6 +737,168 @@ export default function Home() {
     [clearRenderProgressTimeout, stopRenderProgressInterval],
   );
 
+  const recordSnapshotMetrics = useCallback(
+    (processingMs: number | null | undefined) => {
+      if (typeof processingMs !== 'number' || !Number.isFinite(processingMs) || processingMs <= 0) {
+        return;
+      }
+      const sanitized = Math.min(Math.max(processingMs, 400), 60000);
+      currentProcessingMsRef.current = sanitized;
+      lastRenderDurationRef.current = smoothDurationEstimate(lastRenderDurationRef.current, sanitized);
+    },
+    [],
+  );
+
+  const scheduleSnapshot = useCallback(
+    (payload: RenderGifPayload) => {
+      latestSnapshotPayloadRef.current = payload;
+      const sessionId = renderSessionIdRef.current;
+      const revision = snapshotRevisionRef.current + 1;
+      snapshotRevisionRef.current = revision;
+      setSnapshotState('pending');
+
+      const previousController = snapshotAbortControllerRef.current;
+      if (previousController) {
+        previousController.abort();
+      }
+      const controller = new AbortController();
+      snapshotAbortControllerRef.current = controller;
+
+      const promise = (async () => {
+        try {
+          const response = await prepareRenderSnapshot({
+            sessionId,
+            revision,
+            payload,
+            signal: controller.signal,
+          });
+
+          if (response.status === 'stored' || response.status === 'unchanged') {
+            lastStoredSnapshotRevisionRef.current = response.revision;
+            recordSnapshotMetrics(response.processingMs ?? null);
+            if (response.revision >= snapshotRevisionRef.current) {
+              evaluateSnapshotState();
+            }
+          } else if (response.status === 'stale') {
+            lastStoredSnapshotRevisionRef.current = Math.max(
+              lastStoredSnapshotRevisionRef.current,
+              response.revision,
+            );
+          }
+        } catch (error) {
+          if (isAbortError(error)) {
+            return;
+          }
+          console.error('Failed to prepare render snapshot', error);
+          reportClientError(error, {
+            hint: 'prepareRenderSnapshot',
+            context: {
+              sessionId,
+              revision,
+            },
+          });
+          setSnapshotState('idle');
+          evaluateSnapshotState();
+        } finally {
+          if (snapshotAbortControllerRef.current === controller) {
+            snapshotAbortControllerRef.current = null;
+          }
+        }
+      })();
+
+      pendingSnapshotRevisionRef.current = revision;
+      pendingSnapshotPromiseRef.current = promise.finally(() => {
+        if (pendingSnapshotRevisionRef.current === revision) {
+          pendingSnapshotPromiseRef.current = null;
+          pendingSnapshotRevisionRef.current = null;
+        }
+        evaluateSnapshotState();
+      });
+
+      return pendingSnapshotPromiseRef.current;
+    },
+    [evaluateSnapshotState, recordSnapshotMetrics],
+  );
+
+  const flushPendingSnapshot = useCallback(async () => {
+    if (scheduledSnapshotTimeoutRef.current !== null && latestSnapshotPayloadRef.current) {
+      const payload = latestSnapshotPayloadRef.current;
+      window.clearTimeout(scheduledSnapshotTimeoutRef.current);
+      scheduledSnapshotTimeoutRef.current = null;
+      const scheduled = scheduleSnapshot(payload);
+      if (scheduled) {
+        try {
+          await scheduled;
+        } catch (error) {
+          if (!isAbortError(error)) {
+            console.error('Snapshot preparation failed', error);
+          }
+        }
+      }
+    }
+
+    if (pendingSnapshotPromiseRef.current) {
+      try {
+        await pendingSnapshotPromiseRef.current;
+      } catch (error) {
+        if (!isAbortError(error)) {
+          console.error('Snapshot preparation failed', error);
+        }
+      }
+    }
+
+    if (
+      lastStoredSnapshotRevisionRef.current < snapshotRevisionRef.current &&
+      latestSnapshotPayloadRef.current
+    ) {
+      const scheduled = scheduleSnapshot(latestSnapshotPayloadRef.current);
+      if (scheduled) {
+        try {
+          await scheduled;
+        } catch (error) {
+          if (!isAbortError(error)) {
+            console.error('Snapshot preparation failed', error);
+          }
+        }
+      }
+    }
+    evaluateSnapshotState();
+  }, [evaluateSnapshotState, scheduleSnapshot]);
+
+  const triggerImmediateSnapshot = useCallback(() => {
+    const payload = latestSnapshotPayloadRef.current;
+    if (!payload) {
+      return;
+    }
+
+    if (scheduledSnapshotTimeoutRef.current !== null) {
+      window.clearTimeout(scheduledSnapshotTimeoutRef.current);
+      scheduledSnapshotTimeoutRef.current = null;
+    }
+
+    setSnapshotState('pending');
+    const scheduled = scheduleSnapshot(payload);
+    if (!scheduled) {
+      evaluateSnapshotState();
+    }
+  }, [evaluateSnapshotState, scheduleSnapshot]);
+
+  const handleSurfacePointerUp = useCallback(
+    (event: Parameters<typeof rawHandleSurfacePointerUp>[0]) => {
+      rawHandleSurfacePointerUp(event);
+      triggerImmediateSnapshot();
+    },
+    [rawHandleSurfacePointerUp, triggerImmediateSnapshot],
+  );
+
+  const handleLinePointerUp = useCallback(
+    (event: Parameters<typeof rawHandleLinePointerUp>[0]) => {
+      rawHandleLinePointerUp(event);
+      triggerImmediateSnapshot();
+    },
+    [rawHandleLinePointerUp, triggerImmediateSnapshot],
+  );
+
   const beginTransferProgress = useCallback(
     (maybeTotalBytes: number | null) => {
       if (renderProgressModeRef.current === 'transfer') {
@@ -621,6 +935,22 @@ export default function Home() {
           Number.isFinite(update.processingMs) && update.processingMs !== null
             ? update.processingMs
             : update.elapsedMs;
+        if (currentDownloadStrategyRef.current === 'snapshot') {
+          currentProcessingMsRef.current = 0;
+          const estimatedTransfer =
+            lastTransferDurationRef.current > 0
+              ? Math.max(600, lastTransferDurationRef.current)
+              : Math.max(600, normalizedProcessing * 0.35);
+          renderProgressEstimateRef.current = Math.min(Math.max(estimatedTransfer, 600), 60000);
+
+          const elapsed = performance.now() - renderProgressStartRef.current;
+          const remainingMs = Math.max(0, renderProgressEstimateRef.current - elapsed);
+          setRenderEtaSeconds(
+            remainingMs > 80 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
+          );
+          return;
+        }
+
         currentProcessingMsRef.current = normalizedProcessing;
 
         const estimatedTransfer =
@@ -693,6 +1023,87 @@ export default function Home() {
       renderProgressModeRef.current = 'idle';
     };
   }, [stopRenderProgressInterval, clearRenderProgressTimeout]);
+
+  const parsedCanvasWidth = (() => {
+    const parsed = Number(canvasWidth);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1080;
+  })();
+
+  const parsedCanvasHeight = (() => {
+    const parsed = Number(canvasHeight);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1080;
+  })();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const nextBackground = await ensureBackgroundForExport({
+          source: canvasBackground?.src ?? null,
+          width: parsedCanvasWidth,
+          height: parsedCanvasHeight,
+        });
+        if (!cancelled) {
+          setPreparedBackground(nextBackground);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to prepare background for snapshot', error);
+          setPreparedBackground(null);
+        }
+        reportClientError(error, {
+          hint: 'prepareBackgroundForSnapshot',
+          context: {
+            canvasWidth: parsedCanvasWidth,
+            canvasHeight: parsedCanvasHeight,
+          },
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [canvasBackground, parsedCanvasHeight, parsedCanvasWidth]);
+
+  useEffect(() => {
+    evaluateSnapshotState();
+  }, [evaluateSnapshotState]);
+
+  useEffect(() => {
+    if (!preparedBackground) {
+      latestSnapshotPayloadRef.current = null;
+      return undefined;
+    }
+
+    const snapshotLines = cloneLineSegments(lines);
+    const payload = buildRenderPayload({
+      width: parsedCanvasWidth,
+      height: parsedCanvasHeight,
+      background: preparedBackground,
+      lines: snapshotLines,
+    });
+
+    latestSnapshotPayloadRef.current = payload;
+    setSnapshotState('pending');
+
+    if (scheduledSnapshotTimeoutRef.current !== null) {
+      window.clearTimeout(scheduledSnapshotTimeoutRef.current);
+    }
+
+    scheduledSnapshotTimeoutRef.current = window.setTimeout(() => {
+      scheduledSnapshotTimeoutRef.current = null;
+      scheduleSnapshot(payload);
+    }, SNAPSHOT_DEBOUNCE_MS);
+
+    return () => {
+      if (scheduledSnapshotTimeoutRef.current !== null) {
+        window.clearTimeout(scheduledSnapshotTimeoutRef.current);
+        scheduledSnapshotTimeoutRef.current = null;
+      }
+    };
+  }, [lines, parsedCanvasHeight, parsedCanvasWidth, preparedBackground, scheduleSnapshot]);
 
   useEffect(() => {
     if (!selectedLine) {
@@ -852,16 +1263,6 @@ export default function Home() {
     setCanvasHeight(String(next));
   };
 
-  const parsedCanvasWidth = (() => {
-    const parsed = Number(canvasWidth);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1080;
-  })();
-
-  const parsedCanvasHeight = (() => {
-    const parsed = Number(canvasHeight);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1080;
-  })();
-
   useEffect(() => {
     const handleUndoKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented) {
@@ -986,37 +1387,88 @@ export default function Home() {
       return;
     }
 
-    const lineSnapshot: LineSegment[] = lines.map((line) => ({
-      ...line,
-      start: { ...line.start },
-      end: { ...line.end },
-      controlPoint: line.controlPoint ? { ...line.controlPoint } : null,
-    }));
+    const attemptTimestamp = Date.now();
+    const attemptStartedAt = performance.now();
+    const snapshotStateBefore = snapshotState;
+    let snapshotFlushMs: number | null = null;
+    let snapshotSyncMs: number | null = null;
+    let metricsRecorded = false;
+    const resolvedFilename = buildExportFilename(exportFilename);
+    let downloadStrategyUsed: 'snapshot' | 'direct' = 'snapshot';
 
     setIsExporting(true);
-    startRenderProgress(lastRenderDurationRef.current);
+    const baselineEstimate =
+      snapshotState === 'ready'
+        ? Math.max(lastTransferDurationRef.current, 600)
+        : lastRenderDurationRef.current;
+    startRenderProgress(baselineEstimate);
+    currentDownloadStrategyRef.current = 'snapshot';
 
     const renderOutcome: { totalMs: number | null; processingMs: number | null; transferMs: number | null } =
       { totalMs: null, processingMs: null, transferMs: null };
+    let payload: RenderGifPayload | null = null;
+    let renderResultSummary: Awaited<ReturnType<typeof downloadGifFromSnapshot>> | null = null;
     try {
-      const background = await ensureBackgroundForExport({
-        source: canvasBackground?.src ?? null,
-        width: parsedCanvasWidth,
-        height: parsedCanvasHeight,
-      });
+      if (!preparedBackground) {
+        throw new Error('Background is still being prepared. Please try again in a moment.');
+      }
 
-      const payload = buildRenderPayload({
-        width: parsedCanvasWidth,
-        height: parsedCanvasHeight,
-        background,
-        lines: lineSnapshot,
-      });
+      payload = latestSnapshotPayloadRef.current;
+      if (!payload) {
+        const snapshotLines = cloneLineSegments(lines);
+        payload = buildRenderPayload({
+          width: parsedCanvasWidth,
+          height: parsedCanvasHeight,
+          background: preparedBackground,
+          lines: snapshotLines,
+        });
+        latestSnapshotPayloadRef.current = payload;
+      }
 
-      const filename = buildExportFilename(exportFilename);
-      const renderResult = await downloadGIF(payload, {
-        filename,
-        onProgress: handleDownloadProgressUpdate,
-      });
+      const flushStartedAt = performance.now();
+      await flushPendingSnapshot();
+      snapshotFlushMs = performance.now() - flushStartedAt;
+
+      if (snapshotRevisionRef.current === 0 || lastStoredSnapshotRevisionRef.current < snapshotRevisionRef.current) {
+        const scheduled = scheduleSnapshot(payload);
+        if (scheduled) {
+          const syncStartedAt = performance.now();
+          try {
+            await scheduled;
+          } catch (error) {
+            console.error('Snapshot preparation failed before download', error);
+          }
+          const syncDuration = performance.now() - syncStartedAt;
+          snapshotSyncMs = (snapshotSyncMs ?? 0) + syncDuration;
+        }
+      }
+
+      const filename = resolvedFilename;
+      let renderResult: Awaited<ReturnType<typeof downloadGifFromSnapshot>>;
+
+      try {
+        renderResult = await downloadGifFromSnapshot({
+          sessionId: renderSessionIdRef.current,
+          filename,
+          onProgress: handleDownloadProgressUpdate,
+        });
+      } catch (maybeSnapshotError) {
+        if (!isSnapshotUnavailableError(maybeSnapshotError)) {
+          throw maybeSnapshotError;
+        }
+
+        currentDownloadStrategyRef.current = 'direct';
+        downloadStrategyUsed = 'direct';
+        setSnapshotState('pending');
+        renderResult = await downloadGifOnDemand({
+          payload,
+          filename,
+          onProgress: handleDownloadProgressUpdate,
+        });
+      }
+
+      renderResultSummary = renderResult;
+      downloadStrategyUsed = currentDownloadStrategyRef.current;
 
       renderOutcome.processingMs =
         renderResult.processingMs !== null && Number.isFinite(renderResult.processingMs)
@@ -1030,6 +1482,40 @@ export default function Home() {
         renderResult.totalDurationMs !== null && Number.isFinite(renderResult.totalDurationMs)
           ? renderResult.totalDurationMs
           : renderResult.responseDurationMs;
+
+      recordDownloadMetric({
+        source: 'page',
+        sessionId: renderSessionIdRef.current,
+        filename,
+        processingMs: renderOutcome.processingMs,
+        transferDurationMs: renderOutcome.transferMs,
+        totalDurationMs: renderOutcome.totalMs,
+        totalBytes: renderResult.totalBytes,
+        timestamp: attemptTimestamp,
+        context: {
+          success: true,
+          strategy: downloadStrategyUsed,
+          fallback: downloadStrategyUsed === 'direct',
+          snapshotStateBefore,
+          baselineEstimateMs: baselineEstimate,
+          snapshotFlushMs,
+          snapshotSyncMs,
+          attemptDurationMs: performance.now() - attemptStartedAt,
+          targetMs: 3000,
+          withinTarget: typeof renderOutcome.totalMs === 'number' ? renderOutcome.totalMs <= 3000 : null,
+          lineCount:
+            payload?.lines?.length ??
+            latestSnapshotPayloadRef.current?.lines?.length ??
+            lines.length,
+          canvasWidth: parsedCanvasWidth,
+          canvasHeight: parsedCanvasHeight,
+          backgroundKind: canvasBackground?.kind ?? null,
+        },
+      });
+      metricsRecorded = true;
+
+      recordSnapshotMetrics(renderOutcome.processingMs);
+      evaluateSnapshotState();
     } catch (error) {
       const { errorId, requestId } = extractServerErrorMeta(error);
 
@@ -1037,7 +1523,10 @@ export default function Home() {
       reportClientError(error, {
         hint: 'handleRequestDownload',
         context: {
-          lineCount: lineSnapshot.length,
+          lineCount:
+            payload?.lines?.length ??
+            latestSnapshotPayloadRef.current?.lines?.length ??
+            lines.length,
           canvasWidth: parsedCanvasWidth,
           canvasHeight: parsedCanvasHeight,
           serverErrorId: errorId,
@@ -1049,19 +1538,54 @@ export default function Home() {
         ? `Unable to export the GIF right now. Reference ID: ${errorId}`
         : 'Unable to export the GIF right now. Please try again.';
       window.alert(alertMessage);
+
+      if (!metricsRecorded) {
+        recordDownloadMetric({
+          source: 'page',
+          sessionId: renderSessionIdRef.current,
+          filename: resolvedFilename,
+          processingMs: renderOutcome.processingMs,
+          transferDurationMs: renderOutcome.transferMs,
+          totalDurationMs: renderOutcome.totalMs,
+          totalBytes: renderResultSummary?.totalBytes ?? null,
+          timestamp: attemptTimestamp,
+          context: {
+            success: false,
+            strategy: downloadStrategyUsed,
+            fallback: downloadStrategyUsed === 'direct',
+            snapshotStateBefore,
+            baselineEstimateMs: baselineEstimate,
+            snapshotFlushMs,
+            snapshotSyncMs,
+            attemptDurationMs: performance.now() - attemptStartedAt,
+            errorId,
+            requestId,
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+        metricsRecorded = true;
+      }
     } finally {
       concludeRenderProgress(renderOutcome);
       setIsExporting(false);
+      evaluateSnapshotState();
     }
   }, [
-    canvasBackground,
     concludeRenderProgress,
     exportFilename,
+    flushPendingSnapshot,
     handleDownloadProgressUpdate,
     isExporting,
     lines,
+    canvasBackground,
+    preparedBackground,
     parsedCanvasHeight,
     parsedCanvasWidth,
+    recordSnapshotMetrics,
+    scheduleSnapshot,
+    evaluateSnapshotState,
+    setSnapshotState,
+    snapshotState,
     startRenderProgress,
   ]);
 
@@ -1070,13 +1594,23 @@ export default function Home() {
       {/* Hotjar Tracking Code for https://peaceful-spence-5e8b7b.netlify.app/ */}
       <Script id="hotjar-tracking" strategy="afterInteractive">
         {`(function(h,o,t,j,a,r){
-          h.hj=h.hj||function(){(h.hj.q=h.hj.q||[]).push(arguments)};
+          if(!h||h.location&&h.location.protocol!=='https:'){
+            if(h&&!h.__hjSkippedLog){
+              h.__hjSkippedLog=true;
+              console.info('[Hotjar] Skipped initialization on non-HTTPS origin.',h.location&&h.location.origin);
+            }
+            return;
+          }
+          if(h.hj||h._hjSettings){
+            return;
+          }
+          h.hj=function(){(h.hj.q=h.hj.q||[]).push(arguments)};
           h._hjSettings={hjid:1831859,hjsv:6};
           a=o.getElementsByTagName('head')[0];
           r=o.createElement('script');r.async=1;
           r.src=t+h._hjSettings.hjid+j+h._hjSettings.hjsv;
           a.appendChild(r);
-        })(window,document,'https://static.hotjar.com/c/hotjar-','.js?sv=');`}
+        })(typeof window!=='undefined'?window:null,document,'https://static.hotjar.com/c/hotjar-','.js?sv=');`}
       </Script>
       <main className="mx-auto flex w-full max-w-screen-2xl flex-1 flex-col gap-6 px-4 py-10 sm:px-6 lg:grid lg:grid-cols-[minmax(220px,0.9fr)_minmax(0,3.2fr)_minmax(280px,0.95fr)] lg:items-stretch lg:gap-10 lg:px-8 xl:gap-12">
         <LayerList
@@ -1147,6 +1681,7 @@ export default function Home() {
           uploadNotice={uploadNotice}
           renderProgress={renderProgress}
           renderEtaSeconds={renderEtaSeconds}
+          snapshotState={snapshotState}
         />
       </main>
       <input

@@ -1,5 +1,43 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-11-12-E]
+// 🔍 WHAT WAS WRONG:
+// The export status badge still shouted “GIF READY” in the right rail, contradicting product’s request to retire that copy.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// The lingering label confused reviewers because other surfaces already dropped the phrase, making the rail feel inconsistent.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Swap the badge text to a neutral “READY” string and refresh the screen-reader label so we keep status coverage without the banned copy.
+
+// 🛠️ EDIT LOG [2025-11-12-D]
+// 🔍 WHAT WAS WRONG:
+// The cached GIF callout still repeated “Cached GIF ready” copy in the export rail, cluttering the sidebar and distracting from the actual controls.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Product wants the cache indicator to feel ambient—just a status badge—so the menu stays focused on actionable settings while background renders stay invisible.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Strip the redundant headline/description, leave the badge as the sole visible cue, and add a subtle status dot plus screen-reader text so we keep accessibility without on-screen narration.
+
+// 🛠️ EDIT LOG [2025-11-12-C]
+// 🔍 WHAT WAS WRONG:
+// Disabling the download button while snapshots rendered made exports feel unavailable even though live rendering fallback still works.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Users assumed downloads were blocked during caching and reported the control as missing, stalling their workflow.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Keep the download button enabled, clarify the tooltip, and trim the redundant caching helper text so background renders stay invisible to the user.
+// 🛠️ EDIT LOG [2025-11-12-B]
+// 🔍 WHAT WAS WRONG:
+// The download button stayed clickable while the snapshot cache was still rendering, so users kept triggering slow direct encodes.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Letting downloads jump the queue defeated the background encoder and broke the “instant” promise when the cache wasn’t ready.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Disable the download button until the snapshot state reports ready and surface clearer button text so users understand when caching is still in flight.
+// 🛠️ EDIT LOG [2025-11-12-A]
+// 🔍 WHAT WAS WRONG:
+// Export controls gave no signal when the cached GIF was ready, so users guessed whether downloads would be instant.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Without visual feedback designers kept re-rendering unnecessarily, undermining the background encoder improvements.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Render a cached-status banner that highlights when the latest snapshot is ready and explains when auto-rendering is still running.
+
 // 🛠️ EDIT LOG [2025-11-11-I]
 // 🔍 WHAT WAS WRONG:
 // The stepper still jumped in whole numbers and allowed over-precise entries, so aiming for widths like 0.5 required retyping and often snapped back to 1.
@@ -73,6 +111,14 @@
 //   - #3 on 2025-11-11 [Stepper jumped by integers; tightened step to 0.1 for reliable thin widths]
 // 🚨 Next steps:
 // Cover locale-specific inputs in component tests to prevent future regressions.
+// 🔁 RECURRING ISSUE TRACKER [Cursor Rule #2 — Export Badge Copy]
+// 🧠 ERROR TYPE: Cached export badge copy regressions
+// 📂 FILE: components/ShapeControls.tsx
+// 🧾 HISTORY: This issue has now occurred 2 times in this project.
+//   - #1 on 2025-11-12 [Removed “Cached GIF ready” headline but badge copy remained elsewhere in the rail]
+//   - #2 on 2025-11-12 [Replaced lingering “GIF READY” badge label with neutral “READY”]
+// 🚨 Next steps:
+// Add visual regression coverage to flag disallowed “GIF READY” copy in the export sidebar.
 
 import type { ChangeEvent, RefObject } from 'react';
 import { useMemo } from 'react';
@@ -120,6 +166,7 @@ type ShapeControlsProps = {
   uploadNotice: string | null;
   renderProgress: number;
   renderEtaSeconds: number | null;
+  snapshotState: 'idle' | 'pending' | 'ready';
 };
 
 const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
@@ -161,6 +208,7 @@ export function ShapeControls({
   uploadNotice,
   renderProgress,
   renderEtaSeconds,
+  snapshotState,
 }: ShapeControlsProps) {
   const formattedObjectColor = useMemo(
     () => color.replace('#', '').toUpperCase(),
@@ -173,6 +221,31 @@ export function ShapeControls({
   const progressPercentage = Math.max(0, Math.min(100, Math.round(renderProgress * 100)));
   const shouldShowProgress = isDownloadInProgress || progressPercentage > 0;
   const etaLabel = formatEtaLabel(renderEtaSeconds, progressPercentage);
+  const snapshotBadgeClass =
+    snapshotState === 'ready'
+      ? 'border border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
+      : snapshotState === 'pending'
+        ? 'border border-amber-300/30 bg-amber-400/10 text-amber-100'
+        : 'border border-white/15 bg-white/5 text-white/60';
+  const snapshotStatusLabel =
+    snapshotState === 'ready'
+      ? 'Cached render ready for instant download.'
+      : snapshotState === 'pending'
+        ? 'Auto-rendering latest edits to prepare the cached GIF.'
+        : 'Waiting for the first cached render.';
+  const snapshotIndicatorClass =
+    snapshotState === 'ready'
+      ? 'bg-emerald-300/70 shadow-[0_0_6px_rgba(16,185,129,0.6)]'
+      : snapshotState === 'pending'
+        ? 'animate-pulse bg-amber-200/70 shadow-[0_0_6px_rgba(245,158,11,0.4)]'
+        : 'bg-white/40';
+  const isDownloadDisabled = isDownloadInProgress;
+  const downloadButtonLabel = isDownloadInProgress ? 'Preparing…' : 'Download';
+  const downloadButtonTitle = isDownloadInProgress
+    ? 'Preparing the GIF for download.'
+    : snapshotState === 'ready'
+      ? 'Download the cached GIF.'
+      : 'Download immediately. If the cache is still rendering we will fall back to a live export.';
 
   return (
     <aside className="order-3 flex w-full flex-col gap-5 rounded-3xl border border-white/10 bg-stone-900/70 p-4 text-xs shadow-2xl shadow-black/30 backdrop-blur lg:order-3 lg:min-w-[260px] lg:max-w-[320px] lg:h-full lg:self-start lg:overflow-y-auto">
@@ -435,6 +508,27 @@ export function ShapeControls({
             disabled={isDownloadInProgress}
           />
         </label>
+        <div
+          className="flex w-full flex-col gap-1.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
+          aria-live="polite"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span
+              className={`inline-flex items-center rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.22em] ${snapshotBadgeClass}`}
+            >
+              {snapshotState === 'ready'
+                ? 'READY'
+                : snapshotState === 'pending'
+                  ? 'RENDERING'
+                  : 'IDLE'}
+            </span>
+            <span className="sr-only">{snapshotStatusLabel}</span>
+            <span
+              className={`h-2.5 w-2.5 rounded-full transition-all duration-300 ${snapshotIndicatorClass}`}
+              aria-hidden="true"
+            />
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
@@ -446,14 +540,17 @@ export function ShapeControls({
           <button
             type="button"
             onClick={onRequestDownload}
-            disabled={isDownloadInProgress}
+            disabled={isDownloadDisabled}
+            title={downloadButtonTitle}
             className={`rounded-2xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg shadow-white/50 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
               isDownloadInProgress
                 ? 'cursor-wait opacity-70 hover:translate-y-0 hover:shadow-lg'
-                : 'hover:translate-y-[-1px] hover:shadow-xl'
+                : isDownloadDisabled
+                  ? 'cursor-not-allowed opacity-60 hover:translate-y-0 hover:shadow-lg'
+                  : 'hover:translate-y-[-1px] hover:shadow-xl'
             }`}
           >
-            {isDownloadInProgress ? 'Preparing…' : 'Download'}
+            {downloadButtonLabel}
           </button>
         </div>
         {shouldShowProgress ? (
