@@ -22,6 +22,7 @@ export type RenderLineInput = {
   y2: number;
   controlX?: number | null;
   controlY?: number | null;
+  points?: { x: number; y: number; controlX?: number | null; controlY?: number | null }[];
   strokeColor: string;
   strokeWidth: number;
   endCap: LineEndCap;

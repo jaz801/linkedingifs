@@ -32,6 +32,10 @@ export type LinePoint = {
   y: number;
 };
 
+export type PathNode = LinePoint & {
+  controlPoint?: LinePoint | null; // For the segment ending at this node
+};
+
 export type LineShapeType = 'circle' | 'square' | 'triangle';
 
 export type LineEndCap = 'line' | 'arrow';
@@ -39,8 +43,10 @@ export type LineEndCap = 'line' | 'arrow';
 export type LineSegment = {
   id: string;
   name: string;
-  start: LinePoint;
-  end: LinePoint;
+  tool: 'line' | 'pen'; // New field to distinguish tool type
+  start: LinePoint; // Kept for 'line' tool compatibility
+  end: LinePoint;   // Kept for 'line' tool compatibility
+  points: PathNode[]; // For 'pen' tool
   stackOrder: number;
   strokeColor: string;
   strokeWidth: number;
@@ -49,7 +55,7 @@ export type LineSegment = {
   shapeType: LineShapeType | null;
   shapeCount: number;
   animateShapes: boolean;
-  controlPoint: LinePoint | null;
+  controlPoint: LinePoint | null; // Kept for 'line' tool compatibility
 };
 
 export type DraftLine = {
@@ -63,16 +69,20 @@ export type TranslateBounds = {
   maxXDelta: number;
   minYDelta: number;
   maxYDelta: number;
+  // For pen tool, we might need bounds for individual points, but for now global bounds are fine
 };
 
 export type DragState = {
   lineId: string;
   pointerId: number;
-  kind: 'translate' | 'start' | 'end' | 'control';
+  kind: 'translate' | 'start' | 'end' | 'control' | 'point' | 'segment_control';
   pointerStart: LinePoint;
   lineStart: LinePoint;
   lineEnd: LinePoint;
   controlPoint: LinePoint | null;
+  // For pen tool:
+  pointIndex?: number; // Index of the point being dragged
+  pointStart?: LinePoint; // Initial position of the point
   lineIndex: number;
   translateBounds: TranslateBounds | null;
 };

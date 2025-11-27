@@ -663,20 +663,44 @@ function drawLines(context: Canvas2DContext, lines: PreparedRenderLine[]) {
 
     context.save();
     context.beginPath();
-    context.moveTo(line.x1, line.y1);
-    if (lineInfo.hasControl) {
-      strokeQuadraticCurve(
-        context as unknown as QuadraticContext,
-        line.x1,
-        line.y1,
-        line.controlX!,
-        line.controlY!,
-        line.x2,
-        line.y2,
-      );
+
+    if (line.points && line.points.length > 0) {
+      line.points.forEach((p, i) => {
+        if (i === 0) {
+          context.moveTo(p.x, p.y);
+        } else {
+          if (p.controlX != null && p.controlY != null) {
+            strokeQuadraticCurve(
+              context as unknown as QuadraticContext,
+              line.points![i - 1].x,
+              line.points![i - 1].y,
+              p.controlX,
+              p.controlY,
+              p.x,
+              p.y
+            );
+          } else {
+            context.lineTo(p.x, p.y);
+          }
+        }
+      });
     } else {
-      context.lineTo(line.x2, line.y2);
+      context.moveTo(line.x1, line.y1);
+      if (lineInfo.hasControl) {
+        strokeQuadraticCurve(
+          context as unknown as QuadraticContext,
+          line.x1,
+          line.y1,
+          line.controlX!,
+          line.controlY!,
+          line.x2,
+          line.y2,
+        );
+      } else {
+        context.lineTo(line.x2, line.y2);
+      }
     }
+
     context.strokeStyle = line.strokeColor ?? '#FFFFFF';
     context.lineWidth = lineInfo.strokeWidth;
     if ('lineCap' in context) {
@@ -803,6 +827,44 @@ function hasControlPoint(line: RenderLineInput): line is RenderLineInput & {
 function evaluateLinePoint(line: RenderLineInput, t: number) {
   const clampedT = Math.max(0, Math.min(1, t));
 
+  if (line.points && line.points.length > 0) {
+    // Multi-segment path logic
+    const totalSegments = line.points.length; // points[0] is start, points[1] is end of first segment if we treat start as separate?
+    // Actually, points array usually includes the start point.
+    // Let's assume points array is [p0, p1, p2, ...].
+    // Segments are (p0, p1), (p1, p2), etc.
+    // Total segments = points.length - 1.
+
+    if (line.points.length < 2) return { x: line.points[0].x, y: line.points[0].y };
+
+    const segmentCount = line.points.length - 1;
+    const segmentIndex = Math.min(Math.floor(clampedT * segmentCount), segmentCount - 1);
+    const segmentT = (clampedT * segmentCount) - segmentIndex;
+
+    const p0 = line.points[segmentIndex];
+    const p1 = line.points[segmentIndex + 1];
+
+    if (p1.controlX != null && p1.controlY != null) {
+      // Quadratic bezier for this segment
+      const oneMinusT = 1 - segmentT;
+      const x =
+        oneMinusT * oneMinusT * p0.x +
+        2 * oneMinusT * segmentT * p1.controlX +
+        segmentT * segmentT * p1.x;
+      const y =
+        oneMinusT * oneMinusT * p0.y +
+        2 * oneMinusT * segmentT * p1.controlY +
+        segmentT * segmentT * p1.y;
+      return { x, y };
+    }
+
+    // Linear segment
+    return {
+      x: p0.x + (p1.x - p0.x) * segmentT,
+      y: p0.y + (p1.y - p0.y) * segmentT,
+    };
+  }
+
   if (hasControlPoint(line)) {
     const oneMinusT = 1 - clampedT;
     const x =
@@ -824,6 +886,33 @@ function evaluateLinePoint(line: RenderLineInput, t: number) {
 
 function evaluateLineTangent(line: RenderLineInput, t: number) {
   const clampedT = Math.max(0, Math.min(1, t));
+
+  if (line.points && line.points.length > 0) {
+    if (line.points.length < 2) return { dx: 0, dy: 0 };
+
+    const segmentCount = line.points.length - 1;
+    const segmentIndex = Math.min(Math.floor(clampedT * segmentCount), segmentCount - 1);
+    const segmentT = (clampedT * segmentCount) - segmentIndex;
+
+    const p0 = line.points[segmentIndex];
+    const p1 = line.points[segmentIndex + 1];
+
+    if (p1.controlX != null && p1.controlY != null) {
+      const oneMinusT = 1 - segmentT;
+      const dx =
+        2 * oneMinusT * (p1.controlX - p0.x) +
+        2 * segmentT * (p1.x - p1.controlX);
+      const dy =
+        2 * oneMinusT * (p1.controlY - p0.y) +
+        2 * segmentT * (p1.y - p1.controlY);
+      return { dx, dy };
+    }
+
+    return {
+      dx: p1.x - p0.x,
+      dy: p1.y - p0.y,
+    };
+  }
 
   if (hasControlPoint(line)) {
     const oneMinusT = 1 - clampedT;

@@ -44,7 +44,7 @@ import type { DraftLine, LineSegment } from '@/lib/canvas/types';
 import { approximateLineLength, computeArrowHeadDimensions } from '@/lib/render/arrowGeometry';
 
 type CanvasStageProps = {
-  tool: 'arrow' | 'line';
+  tool: 'arrow' | 'line' | 'pen';
   canvasWidth: number;
   canvasHeight: number;
   color: string;
@@ -98,12 +98,28 @@ export function CanvasStage({
     [lines],
   );
 
-  const buildLinePath = (line: LineSegment) =>
-    line.controlPoint
+  const buildLinePath = (line: LineSegment) => {
+    if (line.tool === 'pen' && line.points.length > 0) {
+      const d = line.points.map((p, i) => {
+        if (i === 0) return `M ${p.x} ${p.y}`;
+        if (p.controlPoint) {
+          return `Q ${p.controlPoint.x} ${p.controlPoint.y} ${p.x} ${p.y}`;
+        }
+        return `L ${p.x} ${p.y}`;
+      }).join(' ');
+      return d;
+    }
+
+    return line.controlPoint
       ? `M ${line.start.x} ${line.start.y} Q ${line.controlPoint.x} ${line.controlPoint.y} ${line.end.x} ${line.end.y}`
       : `M ${line.start.x} ${line.start.y} L ${line.end.x} ${line.end.y}`;
+  };
 
   const evaluateLinePoint = (line: LineSegment, t: number) => {
+    // For pen tool, t would need to be mapped to segments.
+    // For now, let's keep simple implementation for line/arrow.
+    // Animation logic for pen tool will be added later.
+
     const clampedT = Math.max(0, Math.min(1, t));
     if (line.controlPoint) {
       const oneMinusT = 1 - clampedT;
@@ -148,6 +164,38 @@ export function CanvasStage({
   const renderLineEndCap = (line: LineSegment) => {
     if (line.endCap !== 'arrow') {
       return null;
+    }
+
+    // For pen tool, we need to find the last segment to calculate tangent
+    if (line.tool === 'pen') {
+      if (line.points.length < 2) return null;
+      const lastPoint = line.points[line.points.length - 1];
+      const prevPoint = line.points[line.points.length - 2];
+
+      // Simple tangent for now (linear)
+      // TODO: Support curves
+      const dx = lastPoint.x - prevPoint.x;
+      const dy = lastPoint.y - prevPoint.y;
+
+      const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+      const approxLength = Math.hypot(dx, dy); // Just last segment length
+      const dimensions = computeArrowHeadDimensions(line.strokeWidth, approxLength);
+      if (!dimensions) return null;
+
+      const { headLength, halfWidth } = dimensions;
+
+      return (
+        <g
+          key={`${line.id}-arrow-head`}
+          transform={`translate(${lastPoint.x} ${lastPoint.y}) rotate(${angle})`}
+          style={{ pointerEvents: 'none' }}
+        >
+          <polygon
+            points={`0,${halfWidth} 0,${-halfWidth} ${headLength},0`}
+            fill={line.strokeColor}
+          />
+        </g>
+      );
     }
 
     const endPoint = evaluateLinePoint(line, 1);
@@ -277,22 +325,22 @@ export function CanvasStage({
   };
 
   const handleSurfacePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line') return;
+    if (tool !== 'line' && tool !== 'pen') return;
     onSurfacePointerDown(event);
   };
 
   const handleSurfacePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line') return;
+    if (tool !== 'line' && tool !== 'pen') return;
     onSurfacePointerMove(event);
   };
 
   const handleSurfacePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line') return;
+    if (tool !== 'line' && tool !== 'pen') return;
     onSurfacePointerUp(event);
   };
 
   const handleSurfacePointerLeave = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line') return;
+    if (tool !== 'line' && tool !== 'pen') return;
     onSurfacePointerLeave(event);
   };
 
@@ -325,7 +373,7 @@ export function CanvasStage({
         <div className="relative w-full overflow-hidden rounded-3xl border border-white/10 bg-stone-900/70 shadow-2xl shadow-black/30">
           <div
             ref={drawingSurfaceRef}
-            className={`relative w-full select-none ${tool === 'line' ? 'cursor-crosshair' : 'cursor-default'}`}
+            className={`relative w-full select-none ${tool === 'line' || tool === 'pen' ? 'cursor-crosshair' : 'cursor-default'}`}
             onPointerDown={handleSurfacePointerDown}
             onPointerMove={handleSurfacePointerMove}
             onPointerUp={handleSurfacePointerUp}
@@ -419,7 +467,7 @@ export function CanvasStage({
                       onPointerCancel={handleLinePointerCancel}
                     />
                     {renderLineEndCap(line)}
-                    {showHandles && (
+                    {showHandles && line.tool !== 'pen' && (
                       <g>
                         <circle
                           data-line-id={line.id}
@@ -466,6 +514,57 @@ export function CanvasStage({
                           onPointerUp={handleLinePointerUp}
                           onPointerCancel={handleLinePointerCancel}
                         />
+                      </g>
+                    )}
+                    {showHandles && line.tool === 'pen' && (
+                      <g>
+                        {line.points.map((point, index) => (
+                          <circle
+                            key={`${line.id}-point-${index}`}
+                            data-line-id={line.id}
+                            data-handle-kind="point"
+                            data-point-index={index}
+                            cx={point.x}
+                            cy={point.y}
+                            r={handleRadius}
+                            fill={line.strokeColor}
+                            stroke={handleStrokeColor}
+                            strokeWidth={handleStrokeWidth}
+                            style={{ cursor: 'grab' }}
+                            onPointerDown={handleLinePointerDown}
+                            onPointerMove={handleLinePointerMove}
+                            onPointerUp={handleLinePointerUp}
+                            onPointerCancel={handleLinePointerCancel}
+                          />
+                        ))}
+                        {line.points.map((point, index) => {
+                          if (index === 0) return null;
+                          const prev = line.points[index - 1];
+                          const controlPos = point.controlPoint ?? {
+                            x: (prev.x + point.x) / 2,
+                            y: (prev.y + point.y) / 2
+                          };
+
+                          return (
+                            <circle
+                              key={`${line.id}-segment-${index}`}
+                              data-line-id={line.id}
+                              data-handle-kind="segment_control"
+                              data-point-index={index}
+                              cx={controlPos.x}
+                              cy={controlPos.y}
+                              r={handleRadius * 0.9}
+                              fill="#F9FAFB"
+                              stroke={handleStrokeColor}
+                              strokeWidth={handleStrokeWidth}
+                              style={{ cursor: 'grab' }}
+                              onPointerDown={handleLinePointerDown}
+                              onPointerMove={handleLinePointerMove}
+                              onPointerUp={handleLinePointerUp}
+                              onPointerCancel={handleLinePointerCancel}
+                            />
+                          );
+                        })}
                       </g>
                     )}
                     {line.shapeType && line.shapeCount > 0 && line.animateShapes && (

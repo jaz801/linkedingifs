@@ -118,7 +118,7 @@ const resolveDragLineIndex = (lines: LineSegment[], state: DragState) => {
   return fallbackIndex;
 };
 
-export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManagerOptions) {
+export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLinesManagerOptions & { tool: 'arrow' | 'line' | 'pen' }) {
   const drawingSurfaceRef = useRef<HTMLDivElement>(null);
   const [lines, setLines] = useState<LineSegment[]>([]);
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
@@ -129,10 +129,21 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
   const lineCounterRef = useRef(0);
   const clipboardLineRef = useRef<LineSegment | null>(null);
 
+  // Track the active pen path being drawn
+  const activePenLineIdRef = useRef<string | null>(null);
+
   const updateDraftLine = useCallback((next: DraftLine | null) => {
     draftLineRef.current = next;
     setDraftLine(next);
   }, []);
+
+  // Reset active pen line when tool changes
+  useEffect(() => {
+    if (tool !== 'pen') {
+      activePenLineIdRef.current = null;
+      updateDraftLine(null);
+    }
+  }, [tool, updateDraftLine]);
 
   const orderedLines = useMemo(() => {
     return [...lines].sort((a, b) => b.stackOrder - a.stackOrder);
@@ -166,9 +177,20 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
         return prevLines;
       }
 
+      // If we are drawing a pen line, undoing should remove the last point?
+      // For now, let's keep simple undo behavior (remove last object)
+      // But if we are in the middle of drawing a pen line, maybe we should remove the last point?
+      // The user request didn't specify undo behavior for points.
+      // Let's stick to removing the whole object for now to be safe, or check if activePenLineId matches.
+
       const nextLines = prevLines.slice(0, -1);
       const removedLine = prevLines[prevLines.length - 1];
       didUndo = true;
+
+      if (removedLine.id === activePenLineIdRef.current) {
+        activePenLineIdRef.current = null;
+        updateDraftLine(null);
+      }
 
       setSelectedLineId((currentSelectedId) => {
         if (currentSelectedId === removedLine.id) {
@@ -190,7 +212,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
     });
 
     return didUndo;
-  }, []);
+  }, [updateDraftLine]);
 
   const finalizeLine = useCallback(
     (endPoint: LinePoint, shiftKey: boolean) => {
@@ -211,8 +233,10 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       const nextLine: LineSegment = {
         id: `line-${nextCount}`,
         name: `Line ${nextCount}`,
+        tool: 'line',
         start: current.start,
         end: finalEnd,
+        points: [],
         controlPoint: null,
         stackOrder: nextCount,
         strokeColor: color.toUpperCase(),
@@ -247,13 +271,72 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
 
       const startPoint = getRelativePoint(event);
 
+      if (tool === 'pen') {
+        const activeId = activePenLineIdRef.current;
+
+        if (activeId) {
+          // Add point to existing pen line
+          setLines((prev) => prev.map(line => {
+            if (line.id === activeId) {
+              return {
+                ...line,
+                points: [...line.points, { ...startPoint }]
+              };
+            }
+            return line;
+          }));
+
+          // Update draft line to start from this new point
+          updateDraftLine({
+            start: startPoint,
+            end: startPoint,
+            isShiftLocked: event.shiftKey,
+          });
+        } else {
+          // Start new pen line
+          lineCounterRef.current += 1;
+          const nextCount = lineCounterRef.current;
+          const newId = `line-${nextCount}`;
+
+          const newLine: LineSegment = {
+            id: newId,
+            name: `Path ${nextCount}`,
+            tool: 'pen',
+            start: startPoint, // Not used for pen but kept for types
+            end: startPoint,   // Not used for pen but kept for types
+            points: [{ ...startPoint }],
+            controlPoint: null,
+            stackOrder: nextCount,
+            strokeColor: color.toUpperCase(),
+            strokeWidth: lineWidth,
+            endCap: 'line',
+            shapeColor: shapeColor.toUpperCase(),
+            shapeType: null,
+            shapeCount: 1,
+            animateShapes: true,
+          };
+
+          setLines(prev => [...prev, newLine]);
+          setSelectedLineId(newId);
+          activePenLineIdRef.current = newId;
+
+          updateDraftLine({
+            start: startPoint,
+            end: startPoint,
+            isShiftLocked: event.shiftKey,
+          });
+        }
+        return;
+      }
+
+      // Normal Line Tool Logic
       updateDraftLine({
         start: startPoint,
         end: startPoint,
         isShiftLocked: event.shiftKey,
       });
     },
-    [getRelativePoint, updateDraftLine],
+    [getRelativePoint, updateDraftLine, tool, color, lineWidth, shapeColor],
   );
 
   const handleSurfacePointerMove: SurfacePointerHandler = useCallback(
@@ -277,6 +360,11 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
 
   const handleSurfacePointerUp: SurfacePointerHandler = useCallback(
     (event) => {
+      if (tool === 'pen') {
+        // Pen tool doesn't finish on mouse up, it waits for next click
+        return;
+      }
+
       const current = draftLineRef.current;
       if (!current) return;
 
@@ -290,18 +378,20 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       const endPoint = getRelativePoint(event);
       finalizeLine(endPoint, event.shiftKey || current.isShiftLocked);
     },
-    [finalizeLine, getRelativePoint],
+    [finalizeLine, getRelativePoint, tool],
   );
 
   const handleSurfacePointerLeave: SurfacePointerHandler = useCallback(
     (event) => {
+      if (tool === 'pen') return; // Don't auto-finish pen lines on leave
+
       const current = draftLineRef.current;
       if (!current) return;
 
       const endPoint = getRelativePoint(event);
       finalizeLine(endPoint, event.shiftKey || current.isShiftLocked);
     },
-    [finalizeLine, getRelativePoint],
+    [finalizeLine, getRelativePoint, tool],
   );
 
   const handleLinePointerDown: LinePointerHandler = useCallback(
@@ -312,7 +402,13 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       const lineId = event.currentTarget.dataset.lineId;
       if (!lineId) return;
 
+      // If we are in pen mode and click on a line, maybe we want to select it?
+      // Or if we are in arrow mode, we want to edit it.
+      if (tool !== 'arrow') return;
+
       const targetHandle = (event.currentTarget.dataset.handleKind as DragState['kind']) ?? 'translate';
+      const pointIndexStr = event.currentTarget.dataset.pointIndex;
+      const pointIndex = pointIndexStr ? parseInt(pointIndexStr, 10) : undefined;
 
       setSelectedLineId(lineId);
       setHoveredLineId(lineId);
@@ -332,6 +428,8 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
         controlPoint: line.controlPoint,
         lineIndex,
         translateBounds: targetHandle === 'translate' ? computeTranslateBounds(line) : null,
+        pointIndex,
+        pointStart: pointIndex !== undefined && line.points[pointIndex] ? { ...line.points[pointIndex] } : undefined,
       };
 
       const target = event.currentTarget;
@@ -339,7 +437,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
         target.setPointerCapture(event.pointerId);
       }
     },
-    [getRelativePoint, lines],
+    [getRelativePoint, lines, tool],
   );
 
   const handleLinePointerMove: LinePointerHandler = useCallback(
@@ -350,6 +448,56 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
       event.preventDefault();
 
       const nextPointer = getRelativePoint(event);
+
+      if (dragState.kind === 'point' && dragState.pointIndex !== undefined) {
+        setLines((prevLines) => {
+          const resolvedIndex = resolveDragLineIndex(prevLines, dragState);
+          if (resolvedIndex === -1) return prevLines;
+
+          const existing = prevLines[resolvedIndex];
+          if (!existing.points || !existing.points[dragState.pointIndex!]) return prevLines;
+
+          const nextLines = prevLines.slice();
+          const nextPoints = [...existing.points];
+          nextPoints[dragState.pointIndex!] = {
+            ...nextPoints[dragState.pointIndex!],
+            x: nextPointer.x,
+            y: nextPointer.y,
+          };
+
+          nextLines[resolvedIndex] = {
+            ...existing,
+            points: nextPoints
+          };
+          return nextLines;
+        });
+        return;
+      }
+
+      if (dragState.kind === 'segment_control' && dragState.pointIndex !== undefined) {
+        setLines((prevLines) => {
+          const resolvedIndex = resolveDragLineIndex(prevLines, dragState);
+          if (resolvedIndex === -1) return prevLines;
+
+          const existing = prevLines[resolvedIndex];
+          if (!existing.points || !existing.points[dragState.pointIndex!]) return prevLines;
+
+          const nextLines = prevLines.slice();
+          const nextPoints = [...existing.points];
+          nextPoints[dragState.pointIndex!] = {
+            ...nextPoints[dragState.pointIndex!],
+            controlPoint: { x: nextPointer.x, y: nextPointer.y }
+          };
+
+          nextLines[resolvedIndex] = {
+            ...existing,
+            points: nextPoints
+          };
+          return nextLines;
+        });
+        return;
+      }
+
       if (dragState.kind === 'translate') {
         const bounds = dragState.translateBounds;
         const rawDeltaX = nextPointer.x - dragState.pointerStart.x;
@@ -366,6 +514,25 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
           }
 
           const existing = prevLines[resolvedIndex];
+
+          // Handle Pen Path Translation
+          if (existing.tool === 'pen') {
+            const nextLines = prevLines.slice();
+            nextLines[resolvedIndex] = {
+              ...existing,
+              points: existing.points.map(p => ({
+                ...p,
+                x: p.x + deltaX,
+                y: p.y + deltaY,
+                controlPoint: p.controlPoint ? {
+                  x: p.controlPoint.x + deltaX,
+                  y: p.controlPoint.y + deltaY
+                } : undefined
+              }))
+            };
+            return nextLines;
+          }
+
           const nextLine: LineSegment = {
             ...existing,
             start: {
@@ -378,9 +545,9 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
             },
             controlPoint: dragState.controlPoint
               ? {
-                  x: dragState.controlPoint.x + deltaX,
-                  y: dragState.controlPoint.y + deltaY,
-                }
+                x: dragState.controlPoint.x + deltaX,
+                y: dragState.controlPoint.y + deltaY,
+              }
               : null,
           };
 
@@ -547,9 +714,9 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
         prevLines.map((line) =>
           line.id === selectedLineId
             ? {
-                ...line,
-                ...next,
-              }
+              ...line,
+              ...next,
+            }
             : line,
         ),
       );
@@ -611,6 +778,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
           ...selectedLine,
           start: { ...selectedLine.start },
           end: { ...selectedLine.end },
+          points: selectedLine.points ? selectedLine.points.map(p => ({ ...p })) : [],
           controlPoint: selectedLine.controlPoint ? { ...selectedLine.controlPoint } : null,
         };
         return;
@@ -651,6 +819,7 @@ export function useLinesManager({ color, lineWidth, shapeColor }: UseLinesManage
           stackOrder: nextOrder,
           start: offsetPoint(copied.start)!,
           end: offsetPoint(copied.end)!,
+          points: copied.points ? copied.points.map(p => ({ ...p, x: shiftWithinBounds(p.x), y: shiftWithinBounds(p.y) })) : [],
           controlPoint: offsetPoint(copied.controlPoint),
         };
 

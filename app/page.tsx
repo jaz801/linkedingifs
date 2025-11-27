@@ -288,6 +288,13 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
     const normalizedStrokeWidth = Math.max(MIN_LINE_WIDTH, line.strokeWidth);
     const strokeWidthPx = normalizedStrokeWidth * averageScale;
 
+    const points = line.tool === 'pen' ? line.points.map(p => ({
+      x: (p.x / 100) * width,
+      y: (p.y / 100) * height,
+      controlX: p.controlPoint ? (p.controlPoint.x / 100) * width : undefined,
+      controlY: p.controlPoint ? (p.controlPoint.y / 100) * height : undefined,
+    })) : undefined;
+
     return {
       x1,
       y1,
@@ -295,6 +302,7 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
       y2,
       controlX,
       controlY,
+      points,
       strokeColor: line.strokeColor,
       strokeWidth: strokeWidthPx,
       endCap: line.endCap ?? 'line',
@@ -517,7 +525,7 @@ export default function Home() {
   const [canvasHeight, setCanvasHeight] = useState('1080');
   const colorInputRef = useRef<HTMLInputElement>(null);
   const shapeColorInputRef = useRef<HTMLInputElement>(null);
-  const [tool, setTool] = useState<'arrow' | 'line'>('arrow');
+  const [tool, setTool] = useState<'arrow' | 'line' | 'pen'>('arrow');
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [canvasBackground, setCanvasBackground] = useState<CanvasBackground | null>(null);
   const [isExporting, setIsExporting] = useState(false);
@@ -605,7 +613,7 @@ export default function Home() {
     undoLastLine,
     updateSelectedLineProperties,
     updateDraftLine,
-  } = useLinesManager({ color, lineWidth, shapeColor });
+  } = useLinesManager({ color, lineWidth, shapeColor, tool });
 
   useEffect(() => {
     if (!selectedLine) {
@@ -1293,7 +1301,7 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleUndoKey);
   }, [undoLastLine]);
 
-  const handleToolSelect = (nextTool: 'arrow' | 'line') => {
+  const handleToolSelect = (nextTool: 'arrow' | 'line' | 'pen') => {
     setTool(nextTool);
     if (nextTool === 'arrow') {
       updateDraftLine(null);
@@ -1357,6 +1365,18 @@ export default function Home() {
     try {
       if (supportedImageMimeTypes.has(file.type.toLowerCase())) {
         const dataUrl = await readFileAsDataUrl(file);
+
+        // 🛠️ EDIT LOG [2025-11-27-A]
+        // 🔍 WHAT WAS WRONG:
+        // The canvas dimensions remained static when uploading a new background, so users had to manually resize the stage to fit their image.
+        // 🤔 WHY IT HAD TO BE CHANGED:
+        // Users expect the workspace to adapt to their content immediately; manual resizing is tedious and prone to aspect ratio errors.
+        // ✅ WHY THIS SOLUTION WAS PICKED:
+        // Load the image to extract its natural dimensions and update the canvas state to match, ensuring a perfect fit automatically.
+        const image = await loadImageElement(dataUrl);
+        setCanvasWidth(String(image.naturalWidth));
+        setCanvasHeight(String(image.naturalHeight));
+
         setCanvasBackground({ kind: 'image', src: dataUrl });
       } else {
         showUploadNotice('Only PNG, JPG, or JPEG backgrounds are supported right now.');
