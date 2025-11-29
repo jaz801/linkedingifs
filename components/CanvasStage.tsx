@@ -107,7 +107,9 @@ export function CanvasStage({
         }
         return `L ${p.x} ${p.y}`;
       }).join(' ');
-      return d;
+
+      // Close the path if marked as closed
+      return line.isClosed ? `${d} Z` : d;
     }
 
     return line.controlPoint

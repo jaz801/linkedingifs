@@ -47,6 +47,7 @@ export type LineSegment = {
   start: LinePoint; // Kept for 'line' tool compatibility
   end: LinePoint;   // Kept for 'line' tool compatibility
   points: PathNode[]; // For 'pen' tool
+  isClosed: boolean; // For 'pen' tool - indicates if the path is closed
   stackOrder: number;
   strokeColor: string;
   strokeWidth: number;

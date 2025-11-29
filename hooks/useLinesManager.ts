@@ -77,6 +77,7 @@ import type {
   LineSegment,
   TranslateBounds,
 } from '@/lib/canvas/types';
+import { smoothPenPath } from '@/lib/canvas/pathSmoothing';
 
 type UseLinesManagerOptions = {
   color: string;
@@ -237,6 +238,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
         start: current.start,
         end: finalEnd,
         points: [],
+        isClosed: false,
         controlPoint: null,
         stackOrder: nextCount,
         strokeColor: color.toUpperCase(),
@@ -275,7 +277,33 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
         const activeId = activePenLineIdRef.current;
 
         if (activeId) {
-          // Add point to existing pen line
+          // Check if we should close the path
+          const activeLine = lines.find(l => l.id === activeId);
+          if (activeLine && activeLine.points.length > 0) {
+            const firstPoint = activeLine.points[0];
+            const distance = Math.hypot(startPoint.x - firstPoint.x, startPoint.y - firstPoint.y);
+            const CLOSURE_THRESHOLD = 5; // Distance threshold for closing the path
+
+            if (distance < CLOSURE_THRESHOLD && activeLine.points.length >= 2) {
+              // Close the path
+              setLines((prev) => prev.map(line => {
+                if (line.id === activeId) {
+                  return {
+                    ...line,
+                    isClosed: true
+                  };
+                }
+                return line;
+              }));
+
+              // Reset active pen line and draft
+              activePenLineIdRef.current = null;
+              updateDraftLine(null);
+              return;
+            }
+          }
+
+          // Add point to existing pen line (preserve exact placement)
           setLines((prev) => prev.map(line => {
             if (line.id === activeId) {
               return {
@@ -305,6 +333,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
             start: startPoint, // Not used for pen but kept for types
             end: startPoint,   // Not used for pen but kept for types
             points: [{ ...startPoint }],
+            isClosed: false,
             controlPoint: null,
             stackOrder: nextCount,
             strokeColor: color.toUpperCase(),
@@ -820,6 +849,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
           start: offsetPoint(copied.start)!,
           end: offsetPoint(copied.end)!,
           points: copied.points ? copied.points.map(p => ({ ...p, x: shiftWithinBounds(p.x), y: shiftWithinBounds(p.y) })) : [],
+          isClosed: copied.isClosed ?? false,
           controlPoint: offsetPoint(copied.controlPoint),
         };
 

@@ -216,7 +216,7 @@ type CanvasBackground = {
 const supportedImageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/pjpeg']);
 
 const DEFAULT_EXPORT_DURATION_SECONDS = 2.8;
-const DEFAULT_EXPORT_FPS = 30;
+const DEFAULT_EXPORT_FPS = 24;
 const FALLBACK_BACKGROUND_COLOR = '#0C0A09';
 const MIN_LINE_WIDTH = 0.1;
 const LINE_WIDTH_DECIMAL_PLACES = 1;
@@ -258,9 +258,7 @@ async function ensureBackgroundForExport({
   width: number;
   height: number;
 }): Promise<string> {
-  if (typeof source === 'string' && source.startsWith('data:image/png')) {
-    return source;
-  }
+
 
   if (typeof source === 'string' && source.startsWith('data:image/')) {
     try {

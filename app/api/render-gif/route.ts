@@ -387,11 +387,18 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
   const canvas = createCanvas(width, height);
   const context = getContext2d(canvas);
 
+  // Enable high-quality rendering
+  if ('imageSmoothingEnabled' in context) {
+    (context as Canvas2DContext & { imageSmoothingEnabled: boolean }).imageSmoothingEnabled = true;
+  }
+  if ('imageSmoothingQuality' in context) {
+    (context as Canvas2DContext & { imageSmoothingQuality: string }).imageSmoothingQuality = 'high';
+  }
+
   const { encoder, completion } = createGifEncoder(width, height, delayMs);
 
   const preparedLines = getPreparedRenderLines(Array.isArray(lines) ? lines : []);
   let pendingDelay = delayMs;
-  let lastFrameSignature: string | null = null;
   let lastFrameBuffer: Buffer | null = null;
 
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
@@ -405,30 +412,26 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
 
     const frame = context.getImageData(0, 0, width, height);
     const frameBuffer = Buffer.from(normalizeFrameData(frame.data));
-    const frameSignature = computeFrameSignature(frameBuffer);
 
-    if (lastFrameSignature === null) {
-      lastFrameSignature = frameSignature;
+    if (lastFrameBuffer === null) {
       lastFrameBuffer = frameBuffer;
       continue;
     }
 
-    if (frameSignature === lastFrameSignature) {
+    // Simple byte comparison for duplicate frames (much faster than SHA1)
+    if (frameBuffer.equals(lastFrameBuffer)) {
       pendingDelay += delayMs;
       timings.skippedFrames += 1;
       continue;
     }
 
-    if (lastFrameBuffer) {
-      const enqueueStartedAt = performance.now();
-      encoder.setDelay(pendingDelay);
-      addFrameToEncoder(encoder, lastFrameBuffer);
-      timings.enqueueMs += performance.now() - enqueueStartedAt;
-      timings.encodedFrames += 1;
-    }
+    const enqueueStartedAt = performance.now();
+    encoder.setDelay(pendingDelay);
+    addFrameToEncoder(encoder, lastFrameBuffer);
+    timings.enqueueMs += performance.now() - enqueueStartedAt;
+    timings.encodedFrames += 1;
 
     pendingDelay = delayMs;
-    lastFrameSignature = frameSignature;
     lastFrameBuffer = frameBuffer;
   }
 
@@ -978,9 +981,6 @@ function summarizePayload(payload: RenderGifPayload) {
   };
 }
 
-function computeFrameSignature(buffer: Buffer) {
-  return createHash('sha1').update(buffer).digest('hex');
-}
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
   return buffer.buffer.slice(

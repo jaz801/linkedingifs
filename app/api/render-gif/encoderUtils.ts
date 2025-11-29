@@ -47,7 +47,7 @@ export function addFrameToEncoder(encoder: EncoderLike, frame: CanvasImageData |
 
 export function configureEncoderForFastRender(encoder: QualityEncoder) {
   try {
-    encoder.setQuality(18);
+    encoder.setQuality(25);
   } catch {
     // ignore encoders without quality tuning
   }

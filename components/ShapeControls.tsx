@@ -221,24 +221,7 @@ export function ShapeControls({
   const progressPercentage = Math.max(0, Math.min(100, Math.round(renderProgress * 100)));
   const shouldShowProgress = isDownloadInProgress || progressPercentage > 0;
   const etaLabel = formatEtaLabel(renderEtaSeconds, progressPercentage);
-  const snapshotBadgeClass =
-    snapshotState === 'ready'
-      ? 'border border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
-      : snapshotState === 'pending'
-        ? 'border border-amber-300/30 bg-amber-400/10 text-amber-100'
-        : 'border border-white/15 bg-white/5 text-white/60';
-  const snapshotStatusLabel =
-    snapshotState === 'ready'
-      ? 'Cached render ready for instant download.'
-      : snapshotState === 'pending'
-        ? 'Auto-rendering latest edits to prepare the cached GIF.'
-        : 'Waiting for the first cached render.';
-  const snapshotIndicatorClass =
-    snapshotState === 'ready'
-      ? 'bg-emerald-300/70 shadow-[0_0_6px_rgba(16,185,129,0.6)]'
-      : snapshotState === 'pending'
-        ? 'animate-pulse bg-amber-200/70 shadow-[0_0_6px_rgba(245,158,11,0.4)]'
-        : 'bg-white/40';
+
   const isDownloadDisabled = isDownloadInProgress;
   const downloadButtonLabel = isDownloadInProgress ? 'Preparing…' : 'Download';
   const downloadButtonTitle = isDownloadInProgress
@@ -295,20 +278,18 @@ export function ShapeControls({
             onClick={onOpenShapeColorPicker}
             aria-label="Open shape color picker"
             disabled={isShapeColorDisabled}
-            className={`flex h-8 w-8 items-center justify-center rounded-2xl border border-white/20 bg-white/90 shadow-inner shadow-black/30 transition hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
-              isShapeColorDisabled
+            className={`flex h-8 w-8 items-center justify-center rounded-2xl border border-white/20 bg-white/90 shadow-inner shadow-black/30 transition hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isShapeColorDisabled
                 ? 'cursor-not-allowed opacity-40 hover:scale-100'
                 : ''
-            }`}
+              }`}
             style={{ backgroundColor: shapeColor }}
           />
           <button
             type="button"
             onClick={onOpenShapeColorPicker}
             disabled={isShapeColorDisabled}
-            className={`rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2 text-[11px] font-medium tracking-[0.3em] text-white transition hover:border-white/30 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
-              isShapeColorDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5' : ''
-            }`}
+            className={`rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2 text-[11px] font-medium tracking-[0.3em] text-white transition hover:border-white/30 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isShapeColorDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5' : ''
+              }`}
           >
             {formattedShapeColor}
           </button>
@@ -358,11 +339,10 @@ export function ShapeControls({
                 onClick={() => onSelectShape(type)}
                 aria-label={`Select ${type}`}
                 disabled={isShapeControlsDisabled}
-                className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
-                  isActive
+                className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isActive
                     ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
                     : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
-                } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
+                  } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
               >
                 {renderShapeIcon(type)}
               </button>
@@ -380,11 +360,10 @@ export function ShapeControls({
           onClick={onToggleAnimation}
           aria-pressed={!isAnimationEnabled}
           disabled={isShapeControlsDisabled}
-          className={`w-full rounded-2xl border px-2.5 py-2 text-[11px] font-semibold tracking-[0.3em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
-            isAnimationEnabled
+          className={`w-full rounded-2xl border px-2.5 py-2 text-[11px] font-semibold tracking-[0.3em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isAnimationEnabled
               ? 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
               : 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
-          } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
+            } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
         >
           Animation Off
         </button>
@@ -404,15 +383,13 @@ export function ShapeControls({
                     option === 'arrow' ? 'Use arrow head' : 'Use plain line end'
                   }
                   disabled={isShapeControlsDisabled}
-                  className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
-                    isActive
+                  className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isActive
                       ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
                       : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
-                  } ${
-                    isShapeControlsDisabled
+                    } ${isShapeControlsDisabled
                       ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60'
                       : ''
-                  }`}
+                    }`}
                 >
                   {renderLineEndCapIcon(option)}
                 </button>
@@ -508,27 +485,7 @@ export function ShapeControls({
             disabled={isDownloadInProgress}
           />
         </label>
-        <div
-          className="flex w-full flex-col gap-1.5 rounded-2xl border border-white/10 bg-white/5 px-3 py-2"
-          aria-live="polite"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <span
-              className={`inline-flex items-center rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.22em] ${snapshotBadgeClass}`}
-            >
-              {snapshotState === 'ready'
-                ? 'READY'
-                : snapshotState === 'pending'
-                  ? 'RENDERING'
-                  : 'IDLE'}
-            </span>
-            <span className="sr-only">{snapshotStatusLabel}</span>
-            <span
-              className={`h-2.5 w-2.5 rounded-full transition-all duration-300 ${snapshotIndicatorClass}`}
-              aria-hidden="true"
-            />
-          </div>
-        </div>
+
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
@@ -542,13 +499,12 @@ export function ShapeControls({
             onClick={onRequestDownload}
             disabled={isDownloadDisabled}
             title={downloadButtonTitle}
-            className={`rounded-2xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg shadow-white/50 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
-              isDownloadInProgress
+            className={`rounded-2xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg shadow-white/50 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isDownloadInProgress
                 ? 'cursor-wait opacity-70 hover:translate-y-0 hover:shadow-lg'
                 : isDownloadDisabled
                   ? 'cursor-not-allowed opacity-60 hover:translate-y-0 hover:shadow-lg'
                   : 'hover:translate-y-[-1px] hover:shadow-xl'
-            }`}
+              }`}
           >
             {downloadButtonLabel}
           </button>
