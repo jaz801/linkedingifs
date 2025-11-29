@@ -74,23 +74,23 @@ type DownloadGifOnDemandOptions = DownloadGifBaseOptions & {
 
 export type DownloadGifProgressUpdate =
   | {
-      phase: 'processing-complete';
-      processingMs: number | null;
-      elapsedMs: number;
-    }
+    phase: 'processing-complete';
+    processingMs: number | null;
+    elapsedMs: number;
+  }
   | {
-      phase: 'transfer';
-      transferredBytes: number;
-      totalBytes: number | null;
-      elapsedMs: number;
-    }
+    phase: 'transfer';
+    transferredBytes: number;
+    totalBytes: number | null;
+    elapsedMs: number;
+  }
   | {
-      phase: 'complete';
-      processingMs: number | null;
-      transferDurationMs: number | null;
-      totalBytes: number | null;
-      totalDurationMs: number;
-    };
+    phase: 'complete';
+    processingMs: number | null;
+    transferDurationMs: number | null;
+    totalBytes: number | null;
+    totalDurationMs: number;
+  };
 
 export type DownloadGifResult = {
   processingMs: number | null;
@@ -305,7 +305,10 @@ async function consumeGifResponse(
       totalDurationMs,
     });
   } finally {
-    URL.revokeObjectURL(url);
+    // Delay revocation to ensure the browser has time to handle the download
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 1000);
   }
 
   return {

@@ -199,9 +199,10 @@ import { LayerList } from '@/components/LayerList';
 import { ShapeControls } from '@/components/ShapeControls';
 import { ToolSelector } from '@/components/ToolSelector';
 import { useLinesManager } from '@/hooks/useLinesManager';
+import { useRenderProgress } from '@/hooks/useRenderProgress';
+import { useSnapshotManager } from '@/hooks/useSnapshotManager';
 import type { LineEndCap, LineSegment, LineShapeType } from '@/lib/canvas/types';
 import { downloadGifFromSnapshot, downloadGifOnDemand } from '@/lib/export/downloadGif';
-import { prepareRenderSnapshot } from '@/lib/render/prepareSnapshot';
 import type { DownloadGifProgressUpdate } from '@/lib/export/downloadGif';
 import { bindGlobalErrorListeners, reportClientError } from '@/lib/monitoring/errorReporter';
 import { recordDownloadMetric } from '@/lib/monitoring/renderMetricsClient';
@@ -490,14 +491,6 @@ function mapShapeTypeToObjectType(shape: LineShapeType | null): RenderObjectInpu
   }
 }
 
-function isAbortError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) {
-    return false;
-  }
-  const maybeName = (error as { name?: unknown }).name;
-  return typeof maybeName === 'string' && maybeName === 'AbortError';
-}
-
 function createRenderSessionId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -506,9 +499,7 @@ function createRenderSessionId() {
   return `session-${random}-${Date.now()}`;
 }
 
-function smoothDurationEstimate(previous: number, sample: number) {
-  return Math.min(60000, previous * 0.4 + sample * 0.6);
-}
+
 
 export default function Home() {
   const [color, setColor] = useState('#ffffff');
@@ -532,54 +523,44 @@ export default function Home() {
   const [exportFilename, setExportFilename] = useState('animation');
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const uploadNoticeTimeoutRef = useRef<number | null>(null);
-  const [renderProgress, setRenderProgress] = useState(0);
-  const [renderEtaSeconds, setRenderEtaSeconds] = useState<number | null>(null);
-  const renderProgressTimerRef = useRef<number | null>(null);
-  const renderProgressSettledTimeoutRef = useRef<number | null>(null);
-  const renderProgressStartRef = useRef<number>(0);
-  const lastRenderDurationRef = useRef<number>(4000);
-  const renderProgressEstimateRef = useRef<number>(4000);
-  const renderProgressModeRef = useRef<'idle' | 'processing' | 'transfer' | 'completed'>('idle');
-  const transferBaseProgressRef = useRef<number>(0);
-  const transferTotalBytesRef = useRef<number | null>(null);
-  const transferStartedAtRef = useRef<number | null>(null);
-  const lastTransferDurationRef = useRef<number>(1200);
-  const currentProcessingMsRef = useRef<number | null>(null);
   const renderSessionIdRef = useRef<string>(createRenderSessionId());
   const [preparedBackground, setPreparedBackground] = useState<string | null>(null);
-  const [snapshotState, setSnapshotState] = useState<'idle' | 'pending' | 'ready'>('idle');
-  const snapshotRevisionRef = useRef(0);
-  const lastStoredSnapshotRevisionRef = useRef(0);
-  const pendingSnapshotPromiseRef = useRef<Promise<void> | null>(null);
-  const pendingSnapshotRevisionRef = useRef<number | null>(null);
-  const snapshotAbortControllerRef = useRef<AbortController | null>(null);
-  const scheduledSnapshotTimeoutRef = useRef<number | null>(null);
-  const latestSnapshotPayloadRef = useRef<RenderGifPayload | null>(null);
   const currentDownloadStrategyRef = useRef<'snapshot' | 'direct'>('snapshot');
-  const evaluateSnapshotState = useCallback(() => {
-    if (!preparedBackground) {
-      setSnapshotState('idle');
-      return;
-    }
 
-    const hasPendingTimer = scheduledSnapshotTimeoutRef.current !== null;
-    const hasPendingRequest = pendingSnapshotPromiseRef.current !== null;
-    const hasStoredLatest =
-      snapshotRevisionRef.current > 0 &&
-      lastStoredSnapshotRevisionRef.current >= snapshotRevisionRef.current;
+  const {
+    renderProgress,
+    setRenderProgress,
+    renderEtaSeconds,
+    setRenderEtaSeconds,
+    startRenderProgress,
+    concludeRenderProgress,
+    beginTransferProgress,
+    renderProgressStartRef,
+    renderProgressEstimateRef,
+    lastRenderDurationRef,
+    lastTransferDurationRef,
+    currentProcessingMsRef,
+    transferTotalBytesRef,
+    renderProgressModeRef,
+  } = useRenderProgress();
 
-    if (hasStoredLatest && !hasPendingTimer && !hasPendingRequest) {
-      setSnapshotState('ready');
-      return;
-    }
-
-    if (hasPendingTimer || hasPendingRequest || snapshotRevisionRef.current > lastStoredSnapshotRevisionRef.current) {
-      setSnapshotState('pending');
-      return;
-    }
-
-    setSnapshotState('idle');
-  }, [preparedBackground]);
+  const {
+    snapshotState,
+    setSnapshotState,
+    scheduleSnapshot,
+    flushPendingSnapshot,
+    triggerImmediateSnapshot,
+    evaluateSnapshotState,
+    recordSnapshotMetrics,
+    latestSnapshotPayloadRef,
+    scheduledSnapshotTimeoutRef,
+    snapshotRevisionRef,
+    lastStoredSnapshotRevisionRef,
+  } = useSnapshotManager({
+    preparedBackground,
+    renderSessionId: renderSessionIdRef.current,
+    lastRenderDurationRef,
+  });
 
   const parseLineWidthInput = useCallback((rawValue: string): number | null => {
     if (rawValue.trim() === '') {
@@ -642,254 +623,7 @@ export default function Home() {
     };
   }, []);
 
-  const clearRenderProgressTimeout = useCallback(() => {
-    if (renderProgressSettledTimeoutRef.current !== null) {
-      window.clearTimeout(renderProgressSettledTimeoutRef.current);
-      renderProgressSettledTimeoutRef.current = null;
-    }
-  }, []);
 
-  const stopRenderProgressInterval = useCallback(() => {
-    if (renderProgressTimerRef.current !== null) {
-      window.clearInterval(renderProgressTimerRef.current);
-      renderProgressTimerRef.current = null;
-    }
-  }, []);
-
-  const startRenderProgress = useCallback(
-    (estimatedMs: number) => {
-      const fallbackMs = Number.isFinite(estimatedMs) && estimatedMs > 0 ? estimatedMs : 4000;
-      const clampedEstimate = Math.min(Math.max(fallbackMs, 600), 60000);
-
-      clearRenderProgressTimeout();
-      stopRenderProgressInterval();
-
-      renderProgressModeRef.current = 'processing';
-      renderProgressEstimateRef.current = clampedEstimate;
-      transferBaseProgressRef.current = 0;
-      transferTotalBytesRef.current = null;
-      transferStartedAtRef.current = null;
-      currentProcessingMsRef.current = null;
-
-      renderProgressStartRef.current = performance.now();
-      setRenderProgress(0.05);
-      setRenderEtaSeconds(Math.round((clampedEstimate / 1000) * 10) / 10);
-
-      renderProgressTimerRef.current = window.setInterval(() => {
-        const elapsed = performance.now() - renderProgressStartRef.current;
-        let estimatedTotal = renderProgressEstimateRef.current;
-
-        if (elapsed > estimatedTotal * 0.98) {
-          estimatedTotal = Math.min(60000, Math.max(elapsed / 0.98, estimatedTotal));
-          renderProgressEstimateRef.current = estimatedTotal;
-        }
-
-        const predicted = estimatedTotal > 0 ? elapsed / estimatedTotal : 0;
-        const capped = Math.min(0.98, Math.max(0.05, predicted));
-
-        setRenderProgress((previous) => (capped > previous ? capped : previous));
-
-        const remainingMs = Math.max(0, renderProgressEstimateRef.current - elapsed);
-        setRenderEtaSeconds(
-          remainingMs > 80 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
-        );
-      }, 120);
-    },
-    [clearRenderProgressTimeout, stopRenderProgressInterval],
-  );
-
-  const concludeRenderProgress = useCallback(
-    (metrics: { totalMs: number | null; processingMs: number | null; transferMs: number | null }) => {
-      clearRenderProgressTimeout();
-      stopRenderProgressInterval();
-
-      renderProgressModeRef.current = 'completed';
-      transferStartedAtRef.current = null;
-      transferTotalBytesRef.current = null;
-
-      const totalMs = metrics.totalMs;
-      const processingMs = metrics.processingMs;
-      const transferMs = metrics.transferMs;
-
-      if (Number.isFinite(totalMs) && totalMs !== null) {
-        const sanitizedTotal = Math.min(Math.max(totalMs, 400), 60000);
-        lastRenderDurationRef.current = Math.min(
-          60000,
-          lastRenderDurationRef.current * 0.4 + sanitizedTotal * 0.6,
-        );
-      } else if (Number.isFinite(processingMs) && processingMs !== null) {
-        const sanitizedProcessing = Math.min(Math.max(processingMs, 400), 60000);
-        lastRenderDurationRef.current = Math.min(
-          60000,
-          lastRenderDurationRef.current * 0.4 + sanitizedProcessing * 0.6,
-        );
-      }
-
-      if (Number.isFinite(transferMs) && transferMs !== null) {
-        lastTransferDurationRef.current = Math.min(
-          60000,
-          lastTransferDurationRef.current * 0.4 + transferMs * 0.6,
-        );
-      }
-
-      setRenderProgress(1);
-      setRenderEtaSeconds(0);
-
-      renderProgressSettledTimeoutRef.current = window.setTimeout(() => {
-        renderProgressModeRef.current = 'idle';
-        setRenderProgress(0);
-        setRenderEtaSeconds(null);
-        renderProgressSettledTimeoutRef.current = null;
-      }, 480);
-    },
-    [clearRenderProgressTimeout, stopRenderProgressInterval],
-  );
-
-  const recordSnapshotMetrics = useCallback(
-    (processingMs: number | null | undefined) => {
-      if (typeof processingMs !== 'number' || !Number.isFinite(processingMs) || processingMs <= 0) {
-        return;
-      }
-      const sanitized = Math.min(Math.max(processingMs, 400), 60000);
-      currentProcessingMsRef.current = sanitized;
-      lastRenderDurationRef.current = smoothDurationEstimate(lastRenderDurationRef.current, sanitized);
-    },
-    [],
-  );
-
-  const scheduleSnapshot = useCallback(
-    (payload: RenderGifPayload) => {
-      latestSnapshotPayloadRef.current = payload;
-      const sessionId = renderSessionIdRef.current;
-      const revision = snapshotRevisionRef.current + 1;
-      snapshotRevisionRef.current = revision;
-      setSnapshotState('pending');
-
-      const previousController = snapshotAbortControllerRef.current;
-      if (previousController) {
-        previousController.abort();
-      }
-      const controller = new AbortController();
-      snapshotAbortControllerRef.current = controller;
-
-      const promise = (async () => {
-        try {
-          const response = await prepareRenderSnapshot({
-            sessionId,
-            revision,
-            payload,
-            signal: controller.signal,
-          });
-
-          if (response.status === 'stored' || response.status === 'unchanged') {
-            lastStoredSnapshotRevisionRef.current = response.revision;
-            recordSnapshotMetrics(response.processingMs ?? null);
-            if (response.revision >= snapshotRevisionRef.current) {
-              evaluateSnapshotState();
-            }
-          } else if (response.status === 'stale') {
-            lastStoredSnapshotRevisionRef.current = Math.max(
-              lastStoredSnapshotRevisionRef.current,
-              response.revision,
-            );
-          }
-        } catch (error) {
-          if (isAbortError(error)) {
-            return;
-          }
-          console.error('Failed to prepare render snapshot', error);
-          reportClientError(error, {
-            hint: 'prepareRenderSnapshot',
-            context: {
-              sessionId,
-              revision,
-            },
-          });
-          setSnapshotState('idle');
-          evaluateSnapshotState();
-        } finally {
-          if (snapshotAbortControllerRef.current === controller) {
-            snapshotAbortControllerRef.current = null;
-          }
-        }
-      })();
-
-      pendingSnapshotRevisionRef.current = revision;
-      pendingSnapshotPromiseRef.current = promise.finally(() => {
-        if (pendingSnapshotRevisionRef.current === revision) {
-          pendingSnapshotPromiseRef.current = null;
-          pendingSnapshotRevisionRef.current = null;
-        }
-        evaluateSnapshotState();
-      });
-
-      return pendingSnapshotPromiseRef.current;
-    },
-    [evaluateSnapshotState, recordSnapshotMetrics],
-  );
-
-  const flushPendingSnapshot = useCallback(async () => {
-    if (scheduledSnapshotTimeoutRef.current !== null && latestSnapshotPayloadRef.current) {
-      const payload = latestSnapshotPayloadRef.current;
-      window.clearTimeout(scheduledSnapshotTimeoutRef.current);
-      scheduledSnapshotTimeoutRef.current = null;
-      const scheduled = scheduleSnapshot(payload);
-      if (scheduled) {
-        try {
-          await scheduled;
-        } catch (error) {
-          if (!isAbortError(error)) {
-            console.error('Snapshot preparation failed', error);
-          }
-        }
-      }
-    }
-
-    if (pendingSnapshotPromiseRef.current) {
-      try {
-        await pendingSnapshotPromiseRef.current;
-      } catch (error) {
-        if (!isAbortError(error)) {
-          console.error('Snapshot preparation failed', error);
-        }
-      }
-    }
-
-    if (
-      lastStoredSnapshotRevisionRef.current < snapshotRevisionRef.current &&
-      latestSnapshotPayloadRef.current
-    ) {
-      const scheduled = scheduleSnapshot(latestSnapshotPayloadRef.current);
-      if (scheduled) {
-        try {
-          await scheduled;
-        } catch (error) {
-          if (!isAbortError(error)) {
-            console.error('Snapshot preparation failed', error);
-          }
-        }
-      }
-    }
-    evaluateSnapshotState();
-  }, [evaluateSnapshotState, scheduleSnapshot]);
-
-  const triggerImmediateSnapshot = useCallback(() => {
-    const payload = latestSnapshotPayloadRef.current;
-    if (!payload) {
-      return;
-    }
-
-    if (scheduledSnapshotTimeoutRef.current !== null) {
-      window.clearTimeout(scheduledSnapshotTimeoutRef.current);
-      scheduledSnapshotTimeoutRef.current = null;
-    }
-
-    setSnapshotState('pending');
-    const scheduled = scheduleSnapshot(payload);
-    if (!scheduled) {
-      evaluateSnapshotState();
-    }
-  }, [evaluateSnapshotState, scheduleSnapshot]);
 
   const handleSurfacePointerUp = useCallback(
     (event: Parameters<typeof rawHandleSurfacePointerUp>[0]) => {
@@ -907,34 +641,7 @@ export default function Home() {
     [rawHandleLinePointerUp, triggerImmediateSnapshot],
   );
 
-  const beginTransferProgress = useCallback(
-    (maybeTotalBytes: number | null) => {
-      if (renderProgressModeRef.current === 'transfer') {
-        if (
-          maybeTotalBytes &&
-          maybeTotalBytes > 0 &&
-          (!transferTotalBytesRef.current || transferTotalBytesRef.current <= 0)
-        ) {
-          transferTotalBytesRef.current = maybeTotalBytes;
-        }
-        return transferBaseProgressRef.current;
-      }
 
-      renderProgressModeRef.current = 'transfer';
-      transferTotalBytesRef.current = maybeTotalBytes ?? null;
-      transferStartedAtRef.current = performance.now();
-      stopRenderProgressInterval();
-
-      const baseProgress = Math.min(0.95, Math.max(renderProgress, 0.12));
-      transferBaseProgressRef.current = baseProgress;
-
-      setRenderProgress((previous) => (previous < baseProgress ? baseProgress : previous));
-      setRenderEtaSeconds(null);
-
-      return baseProgress;
-    },
-    [renderProgress, stopRenderProgressInterval],
-  );
 
   const handleDownloadProgressUpdate = useCallback(
     (update: DownloadGifProgressUpdate) => {
@@ -1024,13 +731,7 @@ export default function Home() {
     [beginTransferProgress],
   );
 
-  useEffect(() => {
-    return () => {
-      stopRenderProgressInterval();
-      clearRenderProgressTimeout();
-      renderProgressModeRef.current = 'idle';
-    };
-  }, [stopRenderProgressInterval, clearRenderProgressTimeout]);
+
 
   const parsedCanvasWidth = (() => {
     const parsed = Number(canvasWidth);
@@ -1111,7 +812,7 @@ export default function Home() {
         scheduledSnapshotTimeoutRef.current = null;
       }
     };
-  }, [lines, parsedCanvasHeight, parsedCanvasWidth, preparedBackground, scheduleSnapshot]);
+  }, [lines, parsedCanvasHeight, parsedCanvasWidth, preparedBackground, scheduleSnapshot, latestSnapshotPayloadRef, setSnapshotState, scheduledSnapshotTimeoutRef]);
 
   useEffect(() => {
     if (!selectedLine) {
@@ -1598,17 +1299,21 @@ export default function Home() {
     isExporting,
     lines,
     canvasBackground,
-    preparedBackground,
+    latestSnapshotPayloadRef,
     parsedCanvasHeight,
     parsedCanvasWidth,
-    recordSnapshotMetrics,
+    preparedBackground,
+    renderSessionIdRef,
     scheduleSnapshot,
-    evaluateSnapshotState,
-    setSnapshotState,
+    snapshotRevisionRef,
+    lastStoredSnapshotRevisionRef,
     snapshotState,
     startRenderProgress,
+    lastTransferDurationRef,
+    lastRenderDurationRef,
+    recordSnapshotMetrics,
+    evaluateSnapshotState,
   ]);
-
   return (
     <div className="flex min-h-screen flex-col bg-stone-950 font-sans text-white">
       {/* Hotjar Tracking Code for https://peaceful-spence-5e8b7b.netlify.app/ */}
