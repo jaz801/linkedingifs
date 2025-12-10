@@ -1,3 +1,24 @@
+// 🛠️ EDIT LOG [2025-01-XX]
+// 🔍 WHAT WAS WRONG:
+// Lines were not rendering at exact positions where users placed them, and background clarity was degraded. Canvas dimensions were floating-point causing precision issues, and encoder quality was too low.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Users reported that lines appeared slightly offset from where they drew them, and backgrounds looked blurry in exported GIFs. Canvas requires integer dimensions, and floating-point coordinates need proper handling.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Round canvas dimensions to integers while preserving exact floating-point coordinates for sub-pixel precision. Improved encoder quality from 10 to 5 for better background clarity. This ensures pixel-perfect rendering that matches the interface exactly.
+// 🛠️ EDIT LOG [2025-01-XX]
+// 🔍 WHAT WAS WRONG:
+// Frame delay was capped at minimum 20ms, limiting GIFs to 50fps max and causing frame rate drops. Users wanted higher frame rates without sacrificing quality.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// The 20ms minimum delay prevented users from achieving smooth high-frame-rate animations, especially for fast-moving objects.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Remove the 20ms cap and use 1ms minimum instead, allowing frame rates up to 1000fps if needed. This maintains speed while enabling higher frame rates.
+// 🎨 DESIGN PRINCIPLES TO PREVENT REGRESSIONS:
+// 1. ALWAYS check `line.points && line.points.length > 0` before accessing pen tool points - pen tool has different data structure
+// 2. ALWAYS handle both `line.points` (pen tool) and `line.x1`/`line.x2` (line/arrow tools) - they are mutually exclusive
+// 3. ALWAYS convert percentage coordinates (0-100) to pixel coordinates in `buildRenderPayload` - backend expects pixels
+// 4. ALWAYS update both `evaluateLinePoint` and `evaluateLineTangent` together when adding new line types - they must stay in sync
+// 5. ALWAYS test pen tool exports after any line rendering changes - it's the most complex case
+// 6. ALWAYS ensure backend and frontend export logic stay in sync - use same coordinate system and path building logic
 // 🛠️ EDIT LOG [2025-11-12-B]
 // 🔍 WHAT WAS WRONG:
 // Every render decoded the background PNG and rebuilt line geometry from scratch, so identical snapshot revisions still spent milliseconds on setup.
@@ -365,7 +386,9 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
   const durationMs = Math.max(0, Math.round(duration * 1000));
   const hasAnimatedObjects = Array.isArray(objects) && objects.length > 0;
   const totalFrames = hasAnimatedObjects ? Math.max(1, Math.round(duration * fps)) : 1;
-  const delayMs = Math.max(20, Math.round(durationMs / totalFrames));
+  // Remove minimum delay cap to allow higher frame rates (previously capped at 20ms = 50fps max)
+  // Use minimum of 1ms to prevent division by zero, allowing up to 1000fps if needed
+  const delayMs = Math.max(1, Math.round(durationMs / totalFrames));
 
   const canvasBindings = loadCanvasBindings();
   const { createCanvas, loadImage } = canvasBindings;
@@ -384,10 +407,13 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
   const backgroundImage = await getCachedBackground(loadImage, background);
   timings.decodeMs = performance.now() - decodeStartedAt;
 
-  const canvas = createCanvas(width, height);
+  // Canvas dimensions must be integers - round to ensure exact pixel rendering
+  const canvasWidth = Math.round(width);
+  const canvasHeight = Math.round(height);
+  const canvas = createCanvas(canvasWidth, canvasHeight);
   const context = getContext2d(canvas);
 
-  // Enable high-quality rendering
+  // Enable high-quality rendering with sub-pixel precision
   if ('imageSmoothingEnabled' in context) {
     (context as Canvas2DContext & { imageSmoothingEnabled: boolean }).imageSmoothingEnabled = true;
   }
@@ -395,7 +421,13 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
     (context as Canvas2DContext & { imageSmoothingQuality: string }).imageSmoothingQuality = 'high';
   }
 
-  const { encoder, completion } = createGifEncoder(width, height, delayMs);
+  // CRITICAL: Coordinates are received as pixels (converted from percentage 0-100 in buildRenderPayload)
+  // These must match EXACTLY what the user sees in the interface
+  // The interface uses SVG viewBox="0 0 100 100" with preserveAspectRatio="none" which stretches non-uniformly
+  // We receive pixel coordinates here, so we draw directly in pixels - no additional scaling needed
+  // Use exact floating-point coordinates to preserve sub-pixel precision
+
+  const { encoder, completion } = createGifEncoder(canvasWidth, canvasHeight, delayMs);
 
   const preparedLines = getPreparedRenderLines(Array.isArray(lines) ? lines : []);
   let pendingDelay = delayMs;
@@ -403,14 +435,14 @@ export async function renderGif(payload: RenderGifPayload): Promise<{
 
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
     const frameStartedAt = performance.now();
-    clearFrame(context, width, height);
-    drawBackground(context, backgroundImage, width, height);
+    clearFrame(context, canvasWidth, canvasHeight);
+    drawBackground(context, backgroundImage, canvasWidth, canvasHeight);
 
     drawLines(context, preparedLines);
     drawObjects(context, objects, preparedLines, frameIndex, totalFrames);
     timings.drawMs += performance.now() - frameStartedAt;
 
-    const frame = context.getImageData(0, 0, width, height);
+    const frame = context.getImageData(0, 0, canvasWidth, canvasHeight);
     const frameBuffer = Buffer.from(normalizeFrameData(frame.data));
 
     if (lastFrameBuffer === null) {

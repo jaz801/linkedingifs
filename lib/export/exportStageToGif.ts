@@ -1,3 +1,23 @@
+// 🛠️ EDIT LOG [2025-01-XX]
+// 🔍 WHAT WAS WRONG:
+// Frontend export completely ignored pen tool lines with `points` array, only rendering `start`/`end` points. This caused pen tool lines to appear in wrong positions or not render at all in exported GIFs.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Pen tool uses a `points` array for multi-segment paths, but the export code only handled simple lines with `start`/`end`. This broke pen tool exports entirely.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added pen tool support by checking `line.tool === 'pen'` and `line.points.length > 0`, then iterating through all points to build the path. Updated `evaluateLinePoint` and `evaluateLineTangent` to handle multi-segment pen paths. This matches the backend renderer logic for consistency.
+// 🎨 DESIGN PRINCIPLES TO PREVENT REGRESSIONS:
+// 1. ALWAYS check `line.tool === 'pen'` before accessing `line.points` - pen tool has different data structure
+// 2. ALWAYS handle both `line.points` (pen tool) and `line.start`/`line.end` (line/arrow tools) - they are mutually exclusive
+// 3. ALWAYS convert percentage coordinates (0-100) to pixel coordinates when rendering - use scale transform OR manual conversion, but be consistent
+// 4. ALWAYS update both `evaluateLinePoint` and `evaluateLineTangent` together when adding new line types - they must stay in sync
+// 5. ALWAYS test pen tool exports after any line rendering changes - it's the most complex case
+// 🛠️ EDIT LOG [2025-01-XX]
+// 🔍 WHAT WAS WRONG:
+// GIF quality was set to 12 (gif.js uses 1-30 scale where lower = better, default is 10), causing blurry lines. Frame delay was capped at 20ms, limiting to 50fps max.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Users reported blurry pen tool lines and frame rate drops. Quality 12 is worse than default 10, and the 20ms cap prevented higher frame rates.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Set quality to 10 (optimal default) and remove delay cap to allow higher frame rates. This matches the backend encoder settings for consistency.
 // 🛠️ EDIT LOG [2025-11-11-E]
 // 🔍 WHAT WAS WRONG:
 // Static exports kept encoding 80+ duplicate frames even when no helper shapes animated, so users waited seconds for GIFs that never changed after the first frame.
@@ -133,6 +153,41 @@ function hasControlPoint(line: LineSegment): line is LineSegment & {
 function evaluateLinePoint(line: LineSegment, t: number) {
   const clampedT = Math.max(0, Math.min(1, t));
 
+  // Handle pen tool with multi-segment paths
+  if (line.tool === 'pen' && line.points && line.points.length > 0) {
+    if (line.points.length < 2) {
+      return { x: line.points[0].x, y: line.points[0].y };
+    }
+
+    const segmentCount = line.points.length - 1;
+    const segmentIndex = Math.min(Math.floor(clampedT * segmentCount), segmentCount - 1);
+    const segmentT = (clampedT * segmentCount) - segmentIndex;
+
+    const p0 = line.points[segmentIndex];
+    const p1 = line.points[segmentIndex + 1];
+
+    // Handle quadratic bezier if control point exists
+    if (p1.controlPoint) {
+      const oneMinusT = 1 - segmentT;
+      const x =
+        oneMinusT * oneMinusT * p0.x +
+        2 * oneMinusT * segmentT * p1.controlPoint.x +
+        segmentT * segmentT * p1.x;
+      const y =
+        oneMinusT * oneMinusT * p0.y +
+        2 * oneMinusT * segmentT * p1.controlPoint.y +
+        segmentT * segmentT * p1.y;
+      return { x, y };
+    }
+
+    // Linear segment
+    return {
+      x: p0.x + (p1.x - p0.x) * segmentT,
+      y: p0.y + (p1.y - p0.y) * segmentT,
+    };
+  }
+
+  // Handle line/arrow tool with single segment
   if (hasControlPoint(line)) {
     const control = line.controlPoint;
     const oneMinusT = 1 - clampedT;
@@ -157,6 +212,39 @@ function evaluateLinePoint(line: LineSegment, t: number) {
 function evaluateLineTangent(line: LineSegment, t: number) {
   const clampedT = Math.max(0, Math.min(1, t));
 
+  // Handle pen tool with multi-segment paths
+  if (line.tool === 'pen' && line.points && line.points.length > 0) {
+    if (line.points.length < 2) {
+      return { dx: 0, dy: 0 };
+    }
+
+    const segmentCount = line.points.length - 1;
+    const segmentIndex = Math.min(Math.floor(clampedT * segmentCount), segmentCount - 1);
+    const segmentT = (clampedT * segmentCount) - segmentIndex;
+
+    const p0 = line.points[segmentIndex];
+    const p1 = line.points[segmentIndex + 1];
+
+    // Handle quadratic bezier if control point exists
+    if (p1.controlPoint) {
+      const oneMinusT = 1 - segmentT;
+      const dx =
+        2 * oneMinusT * (p1.controlPoint.x - p0.x) +
+        2 * segmentT * (p1.x - p1.controlPoint.x);
+      const dy =
+        2 * oneMinusT * (p1.controlPoint.y - p0.y) +
+        2 * segmentT * (p1.y - p1.controlPoint.y);
+      return { dx, dy };
+    }
+
+    // Linear segment
+    return {
+      dx: p1.x - p0.x,
+      dy: p1.y - p0.y,
+    };
+  }
+
+  // Handle line/arrow tool with single segment
   if (hasControlPoint(line)) {
     const control = line.controlPoint;
     const oneMinusT = 1 - clampedT;
@@ -235,12 +323,14 @@ export async function exportStageToGif(options: ExportStageOptions) {
     (line) => line.animateShapes && line.shapeType && line.shapeCount > 0,
   );
   const totalFrames = hasAnimatedShapes ? Math.max(1, Math.round((durationMs / 1000) * fps)) : 1;
-  const frameDelay = Math.max(20, Math.round(durationMs / totalFrames));
+  // Remove minimum delay cap to allow higher frame rates (previously capped at 20ms = 50fps max)
+  // Use minimum of 1ms to prevent division by zero, allowing up to 1000fps if needed
+  const frameDelay = Math.max(1, Math.round(durationMs / totalFrames));
 
   const gif = new GIF({
     workers: 2,
     workerScript: workerSrc,
-    quality: 12,
+    quality: 10, // Lower = better quality (1-30 range, default is 10)
     width: canvas.width,
     height: canvas.height,
   });
@@ -257,6 +347,9 @@ export async function exportStageToGif(options: ExportStageOptions) {
     }
 
     context.save();
+    // Use EXACT same coordinate system as interface: percentage (0-100) with scale transform
+    // This matches SVG viewBox="0 0 100 100" behavior - no pixel conversion, just scale
+    // This ensures pixel-perfect rendering that matches what user sees on screen
     context.scale(canvas.width / 100, canvas.height / 100);
     preparedLines.forEach((line) => {
       const approxLength = approximateLineLength(line);
@@ -273,21 +366,54 @@ export async function exportStageToGif(options: ExportStageOptions) {
       context.lineCap = arrowDimensions ? 'butt' : 'round';
       context.lineJoin = arrowDimensions ? 'miter' : 'round';
       context.beginPath();
-      context.moveTo(line.start.x, line.start.y);
-      if (hasControlPoint(line)) {
-        const control = line.controlPoint;
-        strokeQuadraticCurve(
-          context as unknown as QuadraticContext,
-          line.start.x,
-          line.start.y,
-          control.x,
-          control.y,
-          line.end.x,
-          line.end.y,
-        );
+
+      // Handle pen tool with multi-segment paths
+      if (line.tool === 'pen' && line.points && line.points.length > 0) {
+        line.points.forEach((p, i) => {
+          if (i === 0) {
+            context.moveTo(p.x, p.y);
+          } else {
+            const prevPoint = line.points[i - 1];
+            if (p.controlPoint) {
+              // Quadratic bezier segment
+              strokeQuadraticCurve(
+                context as unknown as QuadraticContext,
+                prevPoint.x,
+                prevPoint.y,
+                p.controlPoint.x,
+                p.controlPoint.y,
+                p.x,
+                p.y,
+              );
+            } else {
+              // Linear segment
+              context.lineTo(p.x, p.y);
+            }
+          }
+        });
+        // Close path if marked as closed
+        if (line.isClosed) {
+          context.closePath();
+        }
       } else {
-        context.lineTo(line.end.x, line.end.y);
+        // Handle line/arrow tool with single segment
+        context.moveTo(line.start.x, line.start.y);
+        if (hasControlPoint(line)) {
+          const control = line.controlPoint;
+          strokeQuadraticCurve(
+            context as unknown as QuadraticContext,
+            line.start.x,
+            line.start.y,
+            control.x,
+            control.y,
+            line.end.x,
+            line.end.y,
+          );
+        } else {
+          context.lineTo(line.end.x, line.end.y);
+        }
       }
+
       context.stroke();
 
       if (arrowDimensions && tangentMagnitude > 0) {

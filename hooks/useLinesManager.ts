@@ -77,7 +77,6 @@ import type {
   LineSegment,
   TranslateBounds,
 } from '@/lib/canvas/types';
-import { smoothPenPath } from '@/lib/canvas/pathSmoothing';
 
 type UseLinesManagerOptions = {
   color: string;
@@ -142,7 +141,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
   useEffect(() => {
     if (tool !== 'pen') {
       activePenLineIdRef.current = null;
-      updateDraftLine(null);
+      setTimeout(() => updateDraftLine(null), 0);
     }
   }, [tool, updateDraftLine]);
 
@@ -365,7 +364,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
         isShiftLocked: event.shiftKey,
       });
     },
-    [getRelativePoint, updateDraftLine, tool, color, lineWidth, shapeColor],
+    [getRelativePoint, updateDraftLine, tool, color, lineWidth, shapeColor, lines],
   );
 
   const handleSurfacePointerMove: SurfacePointerHandler = useCallback(

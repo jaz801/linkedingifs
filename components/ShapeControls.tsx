@@ -1,5 +1,13 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-12-XX-A]
+// 🔍 WHAT WAS WRONG:
+// Export controls showed separate "Export MP4" and "Export GIF" buttons, and MP4 export had no loop options.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Users needed a cleaner export interface with options to control MP4 loops and see video duration before exporting.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Replaced separate buttons with a "Generate" button that opens a dropdown menu with export options. Added loop count control for MP4 exports with real-time duration display.
+
 // 🛠️ EDIT LOG [2025-11-12-E]
 // 🔍 WHAT WAS WRONG:
 // The export status badge still shouted “GIF READY” in the right rail, contradicting product’s request to retire that copy.
@@ -121,7 +129,7 @@
 // Add visual regression coverage to flag disallowed “GIF READY” copy in the export sidebar.
 
 import type { ChangeEvent, RefObject } from 'react';
-import { useMemo } from 'react';
+import { useMemo, useState, useRef, useEffect } from 'react';
 
 import type { LineEndCap, LineShapeType } from '@/lib/canvas/types';
 
@@ -159,14 +167,16 @@ type ShapeControlsProps = {
   onToggleAnimation: () => void;
   onSelectLineEndCap: (endCap: LineEndCap) => void;
   onRequestUpload: () => void;
-  onRequestDownload: () => void;
-  isDownloadInProgress: boolean;
+  onExportMp4: (loops?: number) => void;
+  onExportGif: () => void;
+  isExportingMp4: boolean;
+  isExportingGif: boolean;
   exportFilename: string;
   onExportFilenameChange: (event: ChangeEvent<HTMLInputElement>) => void;
   uploadNotice: string | null;
   renderProgress: number;
   renderEtaSeconds: number | null;
-  snapshotState: 'idle' | 'pending' | 'ready';
+  exportStatusLabel: string | null;
 };
 
 const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
@@ -201,14 +211,16 @@ export function ShapeControls({
   onToggleAnimation,
   onSelectLineEndCap,
   onRequestUpload,
-  onRequestDownload,
-  isDownloadInProgress,
+  onExportMp4,
+  onExportGif,
+  isExportingMp4,
+  isExportingGif,
   exportFilename,
   onExportFilenameChange,
   uploadNotice,
   renderProgress,
   renderEtaSeconds,
-  snapshotState,
+  exportStatusLabel,
 }: ShapeControlsProps) {
   const formattedObjectColor = useMemo(
     () => color.replace('#', '').toUpperCase(),
@@ -218,17 +230,72 @@ export function ShapeControls({
     () => shapeColor.replace('#', '').toUpperCase(),
     [shapeColor],
   );
+
+  const isAnyExporting = isExportingMp4 || isExportingGif;
   const progressPercentage = Math.max(0, Math.min(100, Math.round(renderProgress * 100)));
-  const shouldShowProgress = isDownloadInProgress || progressPercentage > 0;
+  const shouldShowProgress = isAnyExporting || (progressPercentage > 0 && progressPercentage < 100);
   const etaLabel = formatEtaLabel(renderEtaSeconds, progressPercentage);
 
-  const isDownloadDisabled = isDownloadInProgress;
-  const downloadButtonLabel = isDownloadInProgress ? 'Preparing…' : 'Download';
-  const downloadButtonTitle = isDownloadInProgress
-    ? 'Preparing the GIF for download.'
-    : snapshotState === 'ready'
-      ? 'Download the cached GIF.'
-      : 'Download immediately. If the cache is still rendering we will fall back to a live export.';
+  // Export menu state
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showMp4Options, setShowMp4Options] = useState(false);
+  const [mp4Loops, setMp4Loops] = useState(1);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+
+  // Default duration for calculating total video duration
+  const DEFAULT_DURATION_SECONDS = 2.8;
+
+  // Calculate total duration based on loops
+  const totalDurationSeconds = useMemo(() => {
+    return DEFAULT_DURATION_SECONDS * mp4Loops;
+  }, [mp4Loops]);
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setShowExportMenu(false);
+        setShowMp4Options(false);
+      }
+    }
+
+    if (showExportMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+    return undefined;
+  }, [showExportMenu]);
+
+  // Close menu when export starts
+  useEffect(() => {
+    if (isAnyExporting) {
+      setShowExportMenu(false);
+      setShowMp4Options(false);
+    }
+  }, [isAnyExporting]);
+
+  const handleGenerateClick = () => {
+    if (isAnyExporting) return;
+    setShowExportMenu(true);
+  };
+
+  const handleExportMp4Click = () => {
+    if (showMp4Options) {
+      // If options are already shown, proceed with export
+      onExportMp4(mp4Loops);
+      setShowExportMenu(false);
+      setShowMp4Options(false);
+    } else {
+      // Show options first
+      setShowMp4Options(true);
+    }
+  };
+
+  const handleExportGifClick = () => {
+    onExportGif();
+    setShowExportMenu(false);
+    setShowMp4Options(false);
+  };
 
   return (
     <aside className="order-3 flex w-full flex-col gap-5 rounded-3xl border border-white/10 bg-stone-900/70 p-4 text-xs shadow-2xl shadow-black/30 backdrop-blur lg:order-3 lg:min-w-[260px] lg:max-w-[320px] lg:h-full lg:self-start lg:overflow-y-auto">
@@ -279,8 +346,8 @@ export function ShapeControls({
             aria-label="Open shape color picker"
             disabled={isShapeColorDisabled}
             className={`flex h-8 w-8 items-center justify-center rounded-2xl border border-white/20 bg-white/90 shadow-inner shadow-black/30 transition hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isShapeColorDisabled
-                ? 'cursor-not-allowed opacity-40 hover:scale-100'
-                : ''
+              ? 'cursor-not-allowed opacity-40 hover:scale-100'
+              : ''
               }`}
             style={{ backgroundColor: shapeColor }}
           />
@@ -340,8 +407,8 @@ export function ShapeControls({
                 aria-label={`Select ${type}`}
                 disabled={isShapeControlsDisabled}
                 className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isActive
-                    ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
-                    : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
+                  ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
+                  : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
                   } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
               >
                 {renderShapeIcon(type)}
@@ -361,8 +428,8 @@ export function ShapeControls({
           aria-pressed={!isAnimationEnabled}
           disabled={isShapeControlsDisabled}
           className={`w-full rounded-2xl border px-2.5 py-2 text-[11px] font-semibold tracking-[0.3em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isAnimationEnabled
-              ? 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
-              : 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
+            ? 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
+            : 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
             } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
         >
           Animation Off
@@ -384,8 +451,8 @@ export function ShapeControls({
                   }
                   disabled={isShapeControlsDisabled}
                   className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isActive
-                      ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
-                      : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
+                    ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
+                    : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
                     } ${isShapeControlsDisabled
                       ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60'
                       : ''
@@ -482,7 +549,7 @@ export function ShapeControls({
             placeholder="animation"
             className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-medium text-white outline-none transition placeholder:text-white/30 focus:border-white/40 focus:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
             spellCheck={false}
-            disabled={isDownloadInProgress}
+            disabled={isAnyExporting}
           />
         </label>
 
@@ -494,20 +561,109 @@ export function ShapeControls({
           >
             Upload
           </button>
-          <button
-            type="button"
-            onClick={onRequestDownload}
-            disabled={isDownloadDisabled}
-            title={downloadButtonTitle}
-            className={`rounded-2xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg shadow-white/50 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isDownloadInProgress
+
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              type="button"
+              onClick={handleGenerateClick}
+              disabled={isAnyExporting}
+              className={`rounded-2xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg shadow-white/50 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isAnyExporting
                 ? 'cursor-wait opacity-70 hover:translate-y-0 hover:shadow-lg'
-                : isDownloadDisabled
-                  ? 'cursor-not-allowed opacity-60 hover:translate-y-0 hover:shadow-lg'
-                  : 'hover:translate-y-[-1px] hover:shadow-xl'
-              }`}
-          >
-            {downloadButtonLabel}
-          </button>
+                : 'hover:translate-y-[-1px] hover:shadow-xl'
+                }`}
+            >
+              Generate
+            </button>
+
+            {showExportMenu && !isAnyExporting && (
+              <div className="absolute right-0 top-full z-50 mt-2 w-48 rounded-2xl border border-white/10 bg-stone-900/95 p-2 shadow-2xl backdrop-blur">
+                {!showMp4Options ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleExportMp4Click}
+                      className="w-full rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-left text-[11px] font-semibold text-white transition hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+                    >
+                      Export MP4
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportGifClick}
+                      className="mt-2 w-full rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-left text-[11px] font-semibold text-white transition hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+                    >
+                      Export GIF
+                    </button>
+                  </>
+                ) : (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">
+                        Loops
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-2.5 py-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={100}
+                            value={mp4Loops}
+                            onChange={(e) => {
+                              const value = Math.max(1, Math.min(100, parseInt(e.target.value, 10) || 1));
+                              setMp4Loops(value);
+                            }}
+                            className="w-12 bg-transparent text-center text-sm font-semibold text-white outline-none"
+                          />
+                          <div className="flex flex-col items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setMp4Loops(Math.min(100, mp4Loops + 1))}
+                              className="grid h-5 w-5 place-items-center rounded-full border border-white/20 bg-white/10 text-white transition hover:border-white/40 hover:bg-white/20"
+                              aria-label="Increase loops"
+                            >
+                              <svg viewBox="0 0 12 12" className="h-2.5 w-2.5 fill-current">
+                                <path d="M6 3 10 9H2z" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setMp4Loops(Math.max(1, mp4Loops - 1))}
+                              className="grid h-5 w-5 place-items-center rounded-full border border-white/20 bg-white/10 text-white transition hover:border-white/40 hover:bg-white/20"
+                              aria-label="Decrease loops"
+                            >
+                              <svg viewBox="0 0 12 12" className="h-2.5 w-2.5 fill-current">
+                                <path d="M2 4h8L6 10z" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <p className="mt-1.5 text-[10px] text-white/60">
+                        Duration: {totalDurationSeconds.toFixed(1)}s
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMp4Options(false);
+                        }}
+                        className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-medium text-white transition hover:bg-white/10"
+                      >
+                        Back
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportMp4Click}
+                        className="flex-1 rounded-xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg transition hover:shadow-xl"
+                      >
+                        Export
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
         {shouldShowProgress ? (
           <div
@@ -516,7 +672,7 @@ export function ShapeControls({
             aria-live="polite"
           >
             <div className="flex items-center justify-between text-[11px] text-white/60">
-              <span>Rendering GIF…</span>
+              <span>{exportStatusLabel ?? 'Processing...'}</span>
               <span className="text-white/80">{etaLabel}</span>
             </div>
             <div
@@ -543,7 +699,7 @@ export function ShapeControls({
           </p>
         ) : null}
         <p className="text-[11px] text-white/40">
-          Supports PNG, JPG, or JPEG backgrounds. GIF exports match your current canvas dimensions.
+          Supports PNG, JPG, or JPEG backgrounds. MP4 export is fast; GIF export uses high-quality conversion.
         </p>
       </section>
     </aside>
@@ -605,4 +761,5 @@ function renderLineEndCapIcon(option: LineEndCap) {
     </svg>
   );
 }
+
 

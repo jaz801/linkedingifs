@@ -360,12 +360,16 @@ async function buildRenderGifError(
     error.cause = cause;
   }
 
+  // Log full error details including response body for debugging
   console.error('[render-gif] Render failed', {
     strategy,
     status: response.status,
+    statusText: response.statusText,
     message: error.message,
     errorId,
     requestId,
+    cause,
+    url: response.url,
   });
 
   return error;

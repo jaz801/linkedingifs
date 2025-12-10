@@ -1,5 +1,13 @@
 'use client';
 
+// 🛠️ EDIT LOG [2025-12-XX-A]
+// 🔍 WHAT WAS WRONG:
+// GIF exports sometimes downloaded empty files, and MP4 exports didn't support loop count configuration.
+// 🤔 WHY IT HAD TO BE CHANGED:
+// Empty GIF downloads frustrated users, and they needed to control how many times the animation repeats in MP4 exports.
+// ✅ WHY THIS SOLUTION WAS PICKED:
+// Added blob validation before downloading to catch empty files early. Updated MP4 export handler to accept loop count parameter and adjust video duration accordingly. Added validation for both MP4 and GIF blobs to ensure files aren't empty before download.
+
 // 🛠️ EDIT LOG [2025-11-24-A]
 // 🔍 WHAT WAS WRONG:
 // Exported GIFs stretched uploaded backgrounds to the requested canvas size, but the on-canvas preview uses `object-fit: cover`, so annotations drawn against cropped previews shifted when downloaded.
@@ -200,12 +208,9 @@ import { ShapeControls } from '@/components/ShapeControls';
 import { ToolSelector } from '@/components/ToolSelector';
 import { useLinesManager } from '@/hooks/useLinesManager';
 import { useRenderProgress } from '@/hooks/useRenderProgress';
-import { useSnapshotManager } from '@/hooks/useSnapshotManager';
+import { useMp4Export } from '@/hooks/useMp4Export';
 import type { LineEndCap, LineSegment, LineShapeType } from '@/lib/canvas/types';
-import { downloadGifFromSnapshot, downloadGifOnDemand } from '@/lib/export/downloadGif';
-import type { DownloadGifProgressUpdate } from '@/lib/export/downloadGif';
 import { bindGlobalErrorListeners, reportClientError } from '@/lib/monitoring/errorReporter';
-import { recordDownloadMetric } from '@/lib/monitoring/renderMetricsClient';
 import type { RenderGifPayload, RenderObjectInput } from '@/lib/render/schema';
 
 type CanvasBackground = {
@@ -220,7 +225,6 @@ const DEFAULT_EXPORT_FPS = 24;
 const FALLBACK_BACKGROUND_COLOR = '#0C0A09';
 const MIN_LINE_WIDTH = 0.1;
 const LINE_WIDTH_DECIMAL_PLACES = 1;
-const SNAPSHOT_DEBOUNCE_MS = 100;
 
 function clampLineWidth(rawValue: number): number {
   const baseValue = rawValue <= 0 ? MIN_LINE_WIDTH : rawValue;
@@ -271,27 +275,38 @@ async function ensureBackgroundForExport({
   return createSolidBackgroundPng(width, height, FALLBACK_BACKGROUND_COLOR);
 }
 
+// 🎨 CRITICAL DESIGN PRINCIPLE: Pixel-Perfect Coordinate Matching
+// The interface stores coordinates as percentages (0-100) and displays them in SVG viewBox="0 0 100 100"
+// The export MUST render at EXACTLY the same positions - no offsets, no rounding errors
+// We convert percentage to pixels here for backend rendering, using exact floating-point math
+// The backend draws directly in pixels, matching the scaled SVG coordinates exactly
 function buildRenderPayload({ width, height, background, lines }: BuildRenderPayloadParams): RenderGifPayload {
+  // Use exact same coordinate system as interface: percentage (0-100) scaled to pixels
+  // The interface uses SVG viewBox="0 0 100 100" which scales percentage coordinates
+  // We convert to pixels here for backend, but must ensure exact precision - no rounding
   const scaleX = width / 100;
   const scaleY = height / 100;
   const averageScale = (scaleX + scaleY) / 2;
 
   const renderLines = lines.map((line) => {
-    const x1 = (line.start.x / 100) * width;
-    const y1 = (line.start.y / 100) * height;
-    const x2 = (line.end.x / 100) * width;
-    const y2 = (line.end.y / 100) * height;
-    const controlX = line.controlPoint ? (line.controlPoint.x / 100) * width : null;
-    const controlY = line.controlPoint ? (line.controlPoint.y / 100) * height : null;
+    // Convert percentage coordinates (0-100) to pixel coordinates with exact precision
+    // No rounding - use exact floating point to match SVG rendering
+    const x1 = line.start.x * scaleX;
+    const y1 = line.start.y * scaleY;
+    const x2 = line.end.x * scaleX;
+    const y2 = line.end.y * scaleY;
+    const controlX = line.controlPoint ? line.controlPoint.x * scaleX : null;
+    const controlY = line.controlPoint ? line.controlPoint.y * scaleY : null;
 
     const normalizedStrokeWidth = Math.max(MIN_LINE_WIDTH, line.strokeWidth);
     const strokeWidthPx = normalizedStrokeWidth * averageScale;
 
+    // Pen tool: convert all points with exact precision
     const points = line.tool === 'pen' ? line.points.map(p => ({
-      x: (p.x / 100) * width,
-      y: (p.y / 100) * height,
-      controlX: p.controlPoint ? (p.controlPoint.x / 100) * width : undefined,
-      controlY: p.controlPoint ? (p.controlPoint.y / 100) * height : undefined,
+      x: p.x * scaleX,
+      y: p.y * scaleY,
+      controlX: p.controlPoint ? p.controlPoint.x * scaleX : undefined,
+      controlY: p.controlPoint ? p.controlPoint.y * scaleY : undefined,
     })) : undefined;
 
     return {
@@ -356,55 +371,7 @@ function cloneLineSegments(lines: LineSegment[]) {
   }));
 }
 
-function extractServerErrorMeta(error: unknown): { errorId: string | null; requestId: string | null } {
-  let errorId: string | null = null;
-  let requestId: string | null = null;
 
-  if (typeof error === 'object' && error !== null) {
-    if ('errorId' in error) {
-      const value = (error as { errorId?: unknown }).errorId;
-      if (typeof value === 'string' && value.trim().length > 0) {
-        errorId = value;
-      }
-    }
-
-    if ('requestId' in error) {
-      const value = (error as { requestId?: unknown }).requestId;
-      if (typeof value === 'string' && value.trim().length > 0) {
-        requestId = value;
-      }
-    }
-
-    if ('cause' in error) {
-      const cause = (error as { cause?: unknown }).cause;
-      if (typeof cause === 'object' && cause !== null) {
-        if (errorId === null && 'errorId' in cause) {
-          const value = (cause as { errorId?: unknown }).errorId;
-          if (typeof value === 'string' && value.trim().length > 0) {
-            errorId = value;
-          }
-        }
-        if (requestId === null && 'requestId' in cause) {
-          const value = (cause as { requestId?: unknown }).requestId;
-          if (typeof value === 'string' && value.trim().length > 0) {
-            requestId = value;
-          }
-        }
-      }
-    }
-  }
-
-  return { errorId, requestId };
-}
-
-function isSnapshotUnavailableError(error: unknown): error is { status: number } {
-  if (typeof error !== 'object' || error === null) {
-    return false;
-  }
-
-  const status = (error as { status?: unknown }).status;
-  return typeof status === 'number' && (status === 404 || status === 409);
-}
 
 function buildExportFilename(input: string): string {
   const trimmed = input.trim();
@@ -489,13 +456,7 @@ function mapShapeTypeToObjectType(shape: LineShapeType | null): RenderObjectInpu
   }
 }
 
-function createRenderSessionId() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  const random = Math.random().toString(36).slice(2);
-  return `session-${random}-${Date.now()}`;
-}
+
 
 
 
@@ -517,48 +478,18 @@ export default function Home() {
   const [tool, setTool] = useState<'arrow' | 'line' | 'pen'>('arrow');
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [canvasBackground, setCanvasBackground] = useState<CanvasBackground | null>(null);
-  const [isExporting, setIsExporting] = useState(false);
   const [exportFilename, setExportFilename] = useState('animation');
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const uploadNoticeTimeoutRef = useRef<number | null>(null);
-  const renderSessionIdRef = useRef<string>(createRenderSessionId());
   const [preparedBackground, setPreparedBackground] = useState<string | null>(null);
-  const currentDownloadStrategyRef = useRef<'snapshot' | 'direct'>('snapshot');
 
   const {
     renderProgress,
     setRenderProgress,
     renderEtaSeconds,
-    setRenderEtaSeconds,
-    startRenderProgress,
-    concludeRenderProgress,
-    beginTransferProgress,
-    renderProgressStartRef,
-    renderProgressEstimateRef,
-    lastRenderDurationRef,
-    lastTransferDurationRef,
-    currentProcessingMsRef,
-    transferTotalBytesRef,
-    renderProgressModeRef,
   } = useRenderProgress();
 
-  const {
-    snapshotState,
-    setSnapshotState,
-    scheduleSnapshot,
-    flushPendingSnapshot,
-    triggerImmediateSnapshot,
-    evaluateSnapshotState,
-    recordSnapshotMetrics,
-    latestSnapshotPayloadRef,
-    scheduledSnapshotTimeoutRef,
-    snapshotRevisionRef,
-    lastStoredSnapshotRevisionRef,
-  } = useSnapshotManager({
-    preparedBackground,
-    renderSessionId: renderSessionIdRef.current,
-    lastRenderDurationRef,
-  });
+
 
   const parseLineWidthInput = useCallback((rawValue: string): number | null => {
     if (rawValue.trim() === '') {
@@ -581,11 +512,11 @@ export default function Home() {
     setSelectedLineId,
     handleSurfacePointerDown,
     handleSurfacePointerMove,
-    handleSurfacePointerUp: rawHandleSurfacePointerUp,
+    handleSurfacePointerUp,
     handleSurfacePointerLeave,
     handleLinePointerDown,
     handleLinePointerMove,
-    handleLinePointerUp: rawHandleLinePointerUp,
+    handleLinePointerUp,
     handleLinePointerCancel,
     handleLinePointerEnter,
     handleLinePointerLeave,
@@ -623,111 +554,11 @@ export default function Home() {
 
 
 
-  const handleSurfacePointerUp = useCallback(
-    (event: Parameters<typeof rawHandleSurfacePointerUp>[0]) => {
-      rawHandleSurfacePointerUp(event);
-      triggerImmediateSnapshot();
-    },
-    [rawHandleSurfacePointerUp, triggerImmediateSnapshot],
-  );
-
-  const handleLinePointerUp = useCallback(
-    (event: Parameters<typeof rawHandleLinePointerUp>[0]) => {
-      rawHandleLinePointerUp(event);
-      triggerImmediateSnapshot();
-    },
-    [rawHandleLinePointerUp, triggerImmediateSnapshot],
-  );
 
 
 
-  const handleDownloadProgressUpdate = useCallback(
-    (update: DownloadGifProgressUpdate) => {
-      if (update.phase === 'processing-complete') {
-        const normalizedProcessing =
-          Number.isFinite(update.processingMs) && update.processingMs !== null
-            ? update.processingMs
-            : update.elapsedMs;
-        if (currentDownloadStrategyRef.current === 'snapshot') {
-          currentProcessingMsRef.current = 0;
-          const estimatedTransfer =
-            lastTransferDurationRef.current > 0
-              ? Math.max(600, lastTransferDurationRef.current)
-              : Math.max(600, normalizedProcessing * 0.35);
-          renderProgressEstimateRef.current = Math.min(Math.max(estimatedTransfer, 600), 60000);
 
-          const elapsed = performance.now() - renderProgressStartRef.current;
-          const remainingMs = Math.max(0, renderProgressEstimateRef.current - elapsed);
-          setRenderEtaSeconds(
-            remainingMs > 80 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
-          );
-          return;
-        }
 
-        currentProcessingMsRef.current = normalizedProcessing;
-
-        const estimatedTransfer =
-          lastTransferDurationRef.current > 0
-            ? Math.max(600, lastTransferDurationRef.current)
-            : Math.max(600, normalizedProcessing * 0.35);
-
-        const nextEstimate = normalizedProcessing + estimatedTransfer;
-        renderProgressEstimateRef.current = Math.min(Math.max(nextEstimate, 600), 60000);
-
-        const elapsed = performance.now() - renderProgressStartRef.current;
-        const remainingMs = Math.max(0, renderProgressEstimateRef.current - elapsed);
-        setRenderEtaSeconds(
-          remainingMs > 80 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
-        );
-        return;
-      }
-
-      if (update.phase === 'transfer') {
-        const totalBytesHint =
-          update.totalBytes !== null ? update.totalBytes : transferTotalBytesRef.current;
-        const base = beginTransferProgress(totalBytesHint ?? null);
-
-        if (update.totalBytes !== null && update.totalBytes > 0) {
-          transferTotalBytesRef.current = update.totalBytes;
-        }
-
-        const totalBytes = transferTotalBytesRef.current;
-        const elapsed = update.elapsedMs;
-
-        let ratio = 0;
-        if (totalBytes && totalBytes > 0) {
-          ratio = Math.min(1, update.transferredBytes / totalBytes);
-        } else if (elapsed > 0) {
-          const fallbackTransfer = Math.max(lastTransferDurationRef.current, elapsed);
-          ratio = Math.min(1, elapsed / fallbackTransfer);
-        }
-
-        const progress = base + (1 - base) * ratio;
-        setRenderProgress(progress);
-
-        if (ratio > 0) {
-          const estimatedTotal = elapsed / ratio;
-          const remainingMs = Math.max(0, estimatedTotal - elapsed);
-          setRenderEtaSeconds(
-            remainingMs > 60 ? Math.round((remainingMs / 1000) * 10) / 10 : 0,
-          );
-        } else {
-          setRenderEtaSeconds(null);
-        }
-        return;
-      }
-
-      if (update.phase === 'complete') {
-        if (Number.isFinite(update.transferDurationMs) && update.transferDurationMs !== null) {
-          lastTransferDurationRef.current = Math.min(
-            60000,
-            lastTransferDurationRef.current * 0.4 + update.transferDurationMs * 0.6,
-          );
-        }
-      }
-    },
-    [beginTransferProgress],
-  );
 
 
 
@@ -774,43 +605,7 @@ export default function Home() {
     };
   }, [canvasBackground, parsedCanvasHeight, parsedCanvasWidth]);
 
-  useEffect(() => {
-    evaluateSnapshotState();
-  }, [evaluateSnapshotState]);
 
-  useEffect(() => {
-    if (!preparedBackground) {
-      latestSnapshotPayloadRef.current = null;
-      return undefined;
-    }
-
-    const snapshotLines = cloneLineSegments(lines);
-    const payload = buildRenderPayload({
-      width: parsedCanvasWidth,
-      height: parsedCanvasHeight,
-      background: preparedBackground,
-      lines: snapshotLines,
-    });
-
-    latestSnapshotPayloadRef.current = payload;
-    setSnapshotState('pending');
-
-    if (scheduledSnapshotTimeoutRef.current !== null) {
-      window.clearTimeout(scheduledSnapshotTimeoutRef.current);
-    }
-
-    scheduledSnapshotTimeoutRef.current = window.setTimeout(() => {
-      scheduledSnapshotTimeoutRef.current = null;
-      scheduleSnapshot(payload);
-    }, SNAPSHOT_DEBOUNCE_MS);
-
-    return () => {
-      if (scheduledSnapshotTimeoutRef.current !== null) {
-        window.clearTimeout(scheduledSnapshotTimeoutRef.current);
-        scheduledSnapshotTimeoutRef.current = null;
-      }
-    };
-  }, [lines, parsedCanvasHeight, parsedCanvasWidth, preparedBackground, scheduleSnapshot, latestSnapshotPayloadRef, setSnapshotState, scheduledSnapshotTimeoutRef]);
 
   useEffect(() => {
     if (!selectedLine) {
@@ -1101,217 +896,119 @@ export default function Home() {
     setExportFilename(event.target.value);
   };
 
-  const handleRequestDownload = useCallback(async () => {
-    if (isExporting) {
-      return;
-    }
+  const { exportMp4, isExporting: isExportingMp4 } = useMp4Export();
+  const [isExportingGif, setIsExportingGif] = useState(false);
+  const [exportStatusLabel, setExportStatusLabel] = useState<string | null>(null);
 
-    const attemptTimestamp = Date.now();
-    const attemptStartedAt = performance.now();
-    const snapshotStateBefore = snapshotState;
-    let snapshotFlushMs: number | null = null;
-    let snapshotSyncMs: number | null = null;
-    let metricsRecorded = false;
+  const handleExportMp4 = useCallback(async (loops: number = 1) => {
+    if (isExportingMp4 || isExportingGif) return;
+
     const resolvedFilename = buildExportFilename(exportFilename);
-    let downloadStrategyUsed: 'snapshot' | 'direct' = 'snapshot';
+    setExportStatusLabel('Generating MP4...');
 
-    setIsExporting(true);
-    const baselineEstimate =
-      snapshotState === 'ready'
-        ? Math.max(lastTransferDurationRef.current, 600)
-        : lastRenderDurationRef.current;
-    startRenderProgress(baselineEstimate);
-    currentDownloadStrategyRef.current = 'snapshot';
-
-    const renderOutcome: { totalMs: number | null; processingMs: number | null; transferMs: number | null } =
-      { totalMs: null, processingMs: null, transferMs: null };
-    let payload: RenderGifPayload | null = null;
-    let renderResultSummary: Awaited<ReturnType<typeof downloadGifFromSnapshot>> | null = null;
     try {
-      if (!preparedBackground) {
-        throw new Error('Background is still being prepared. Please try again in a moment.');
-      }
-
-      payload = latestSnapshotPayloadRef.current;
-      if (!payload) {
-        const snapshotLines = cloneLineSegments(lines);
-        payload = buildRenderPayload({
-          width: parsedCanvasWidth,
-          height: parsedCanvasHeight,
-          background: preparedBackground,
-          lines: snapshotLines,
-        });
-        latestSnapshotPayloadRef.current = payload;
-      }
-
-      const flushStartedAt = performance.now();
-      await flushPendingSnapshot();
-      snapshotFlushMs = performance.now() - flushStartedAt;
-
-      if (snapshotRevisionRef.current === 0 || lastStoredSnapshotRevisionRef.current < snapshotRevisionRef.current) {
-        const scheduled = scheduleSnapshot(payload);
-        if (scheduled) {
-          const syncStartedAt = performance.now();
-          try {
-            await scheduled;
-          } catch (error) {
-            console.error('Snapshot preparation failed before download', error);
-          }
-          const syncDuration = performance.now() - syncStartedAt;
-          snapshotSyncMs = (snapshotSyncMs ?? 0) + syncDuration;
-        }
-      }
-
-      const filename = resolvedFilename;
-      let renderResult: Awaited<ReturnType<typeof downloadGifFromSnapshot>>;
-
-      try {
-        renderResult = await downloadGifFromSnapshot({
-          sessionId: renderSessionIdRef.current,
-          filename,
-          onProgress: handleDownloadProgressUpdate,
-        });
-      } catch (maybeSnapshotError) {
-        if (!isSnapshotUnavailableError(maybeSnapshotError)) {
-          throw maybeSnapshotError;
-        }
-
-        currentDownloadStrategyRef.current = 'direct';
-        downloadStrategyUsed = 'direct';
-        setSnapshotState('pending');
-        renderResult = await downloadGifOnDemand({
-          payload,
-          filename,
-          onProgress: handleDownloadProgressUpdate,
-        });
-      }
-
-      renderResultSummary = renderResult;
-      downloadStrategyUsed = currentDownloadStrategyRef.current;
-
-      renderOutcome.processingMs =
-        renderResult.processingMs !== null && Number.isFinite(renderResult.processingMs)
-          ? renderResult.processingMs
-          : null;
-      renderOutcome.transferMs =
-        renderResult.transferDurationMs !== null && Number.isFinite(renderResult.transferDurationMs)
-          ? renderResult.transferDurationMs
-          : null;
-      renderOutcome.totalMs =
-        renderResult.totalDurationMs !== null && Number.isFinite(renderResult.totalDurationMs)
-          ? renderResult.totalDurationMs
-          : renderResult.responseDurationMs;
-
-      recordDownloadMetric({
-        source: 'page',
-        sessionId: renderSessionIdRef.current,
-        filename,
-        processingMs: renderOutcome.processingMs,
-        transferDurationMs: renderOutcome.transferMs,
-        totalDurationMs: renderOutcome.totalMs,
-        totalBytes: renderResult.totalBytes,
-        timestamp: attemptTimestamp,
-        context: {
-          success: true,
-          strategy: downloadStrategyUsed,
-          fallback: downloadStrategyUsed === 'direct',
-          snapshotStateBefore,
-          baselineEstimateMs: baselineEstimate,
-          snapshotFlushMs,
-          snapshotSyncMs,
-          attemptDurationMs: performance.now() - attemptStartedAt,
-          targetMs: 3000,
-          withinTarget: typeof renderOutcome.totalMs === 'number' ? renderOutcome.totalMs <= 3000 : null,
-          lineCount:
-            payload?.lines?.length ??
-            latestSnapshotPayloadRef.current?.lines?.length ??
-            lines.length,
-          canvasWidth: parsedCanvasWidth,
-          canvasHeight: parsedCanvasHeight,
-          backgroundKind: canvasBackground?.kind ?? null,
-        },
+      const payload = buildRenderPayload({
+        width: parsedCanvasWidth,
+        height: parsedCanvasHeight,
+        background: preparedBackground || '#000000', // Fallback
+        lines: cloneLineSegments(lines),
       });
-      metricsRecorded = true;
 
-      recordSnapshotMetrics(renderOutcome.processingMs);
-      evaluateSnapshotState();
+      // Adjust duration based on loops
+      const adjustedPayload = {
+        ...payload,
+        duration: payload.duration * loops,
+      };
+
+      const blob = await exportMp4(adjustedPayload, {
+        onProgress: (p) => setRenderProgress(p),
+      });
+
+      if (!blob || blob.size === 0) {
+        throw new Error('Generated MP4 blob is empty');
+      }
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${resolvedFilename.replace(/\.(gif|mp4)$/i, '')}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
     } catch (error) {
-      const { errorId, requestId } = extractServerErrorMeta(error);
+      console.error('MP4 Export failed', error);
+      alert('Failed to export MP4. See console for details.');
+    } finally {
+      setExportStatusLabel(null);
+      setRenderProgress(0);
+    }
+  }, [isExportingMp4, isExportingGif, exportFilename, preparedBackground, parsedCanvasWidth, parsedCanvasHeight, lines, exportMp4, setRenderProgress]);
 
-      console.error('Failed to export GIF', error);
-      reportClientError(error, {
-        hint: 'handleRequestDownload',
-        context: {
-          lineCount:
-            payload?.lines?.length ??
-            latestSnapshotPayloadRef.current?.lines?.length ??
-            lines.length,
-          canvasWidth: parsedCanvasWidth,
-          canvasHeight: parsedCanvasHeight,
-          serverErrorId: errorId,
-          serverRequestId: requestId,
-        },
+  const handleExportGif = useCallback(async () => {
+    if (isExportingMp4 || isExportingGif) return;
+
+    const resolvedFilename = buildExportFilename(exportFilename);
+    setIsExportingGif(true);
+
+    try {
+      // Step 1: Generate MP4 (fast, hardware-accelerated)
+      setExportStatusLabel('Generating MP4...');
+      setRenderProgress(0);
+
+      const payload = buildRenderPayload({
+        width: parsedCanvasWidth,
+        height: parsedCanvasHeight,
+        background: preparedBackground || '#000000',
+        lines: cloneLineSegments(lines),
       });
 
-      const alertMessage = errorId
-        ? `Unable to export the GIF right now. Reference ID: ${errorId}`
-        : 'Unable to export the GIF right now. Please try again.';
-      window.alert(alertMessage);
+      const mp4Blob = await exportMp4(payload, {
+        onProgress: (p) => setRenderProgress(p * 0.6), // MP4 generation is 60% of total
+      });
 
-      if (!metricsRecorded) {
-        recordDownloadMetric({
-          source: 'page',
-          sessionId: renderSessionIdRef.current,
-          filename: resolvedFilename,
-          processingMs: renderOutcome.processingMs,
-          transferDurationMs: renderOutcome.transferMs,
-          totalDurationMs: renderOutcome.totalMs,
-          totalBytes: renderResultSummary?.totalBytes ?? null,
-          timestamp: attemptTimestamp,
-          context: {
-            success: false,
-            strategy: downloadStrategyUsed,
-            fallback: downloadStrategyUsed === 'direct',
-            snapshotStateBefore,
-            baselineEstimateMs: baselineEstimate,
-            snapshotFlushMs,
-            snapshotSyncMs,
-            attemptDurationMs: performance.now() - attemptStartedAt,
-            errorId,
-            requestId,
-            message: error instanceof Error ? error.message : String(error),
-          },
-        });
-        metricsRecorded = true;
+      // Step 2: Convert MP4 to GIF using ffmpeg.wasm
+      setExportStatusLabel('Converting to GIF...');
+      setRenderProgress(0.6);
+
+      // Dynamically import the conversion utility to avoid loading ffmpeg.wasm until needed
+      const { convertMp4ToGif } = await import('@/lib/export/mp4ToGif');
+
+      if (!mp4Blob || mp4Blob.size === 0) {
+        throw new Error('Generated MP4 blob is empty, cannot convert to GIF');
       }
+
+      const gifBlob = await convertMp4ToGif(mp4Blob, {
+        fps: payload.fps,
+        onProgress: (p) => setRenderProgress(0.6 + (p * 0.4)), // Conversion is 40% of total
+      });
+
+      if (!gifBlob || gifBlob.size === 0) {
+        throw new Error('Generated GIF blob is empty');
+      }
+
+      setRenderProgress(1);
+
+      // Download the GIF
+      const url = URL.createObjectURL(gifBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = resolvedFilename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 100);
+
+    } catch (error) {
+      console.error('GIF Export failed', error);
+      alert('Failed to export GIF. See console for details.');
     } finally {
-      concludeRenderProgress(renderOutcome);
-      setIsExporting(false);
-      evaluateSnapshotState();
+      setIsExportingGif(false);
+      setExportStatusLabel(null);
+      setRenderProgress(0);
     }
-  }, [
-    concludeRenderProgress,
-    exportFilename,
-    flushPendingSnapshot,
-    handleDownloadProgressUpdate,
-    isExporting,
-    lines,
-    canvasBackground,
-    latestSnapshotPayloadRef,
-    parsedCanvasHeight,
-    parsedCanvasWidth,
-    preparedBackground,
-    renderSessionIdRef,
-    scheduleSnapshot,
-    snapshotRevisionRef,
-    lastStoredSnapshotRevisionRef,
-    snapshotState,
-    startRenderProgress,
-    lastTransferDurationRef,
-    lastRenderDurationRef,
-    recordSnapshotMetrics,
-    evaluateSnapshotState,
-  ]);
+  }, [isExportingMp4, isExportingGif, exportFilename, preparedBackground, parsedCanvasWidth, parsedCanvasHeight, lines, exportMp4, setRenderProgress]);
   return (
     <div className="flex min-h-screen flex-col bg-stone-950 font-sans text-white">
       {/* Hotjar Tracking Code for https://peaceful-spence-5e8b7b.netlify.app/ */}
@@ -1397,14 +1094,16 @@ export default function Home() {
           onToggleAnimation={handleToggleShapeAnimation}
           onSelectLineEndCap={handleSelectLineEndCap}
           onRequestUpload={handleRequestUpload}
-          onRequestDownload={handleRequestDownload}
-          isDownloadInProgress={isExporting}
+          onExportMp4={handleExportMp4}
+          onExportGif={handleExportGif}
+          isExportingMp4={isExportingMp4}
+          isExportingGif={isExportingGif}
           exportFilename={exportFilename}
           onExportFilenameChange={handleExportFilenameChange}
           uploadNotice={uploadNotice}
           renderProgress={renderProgress}
           renderEtaSeconds={renderEtaSeconds}
-          snapshotState={snapshotState}
+          exportStatusLabel={exportStatusLabel}
         />
       </main>
       <input
