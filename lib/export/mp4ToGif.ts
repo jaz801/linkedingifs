@@ -136,14 +136,14 @@ export async function convertMp4ToGif(
         if (!(data instanceof Uint8Array)) {
             throw new Error('Expected binary data from ffmpeg');
         }
-        
+
         // Ensure we have valid data
         if (data.length === 0) {
             throw new Error('FFmpeg conversion resulted in empty GIF data');
         }
-        
+
         // Create blob from the Uint8Array directly (Uint8Array is a valid BlobPart)
-        return new Blob([data], { type: 'image/gif' });
+        return new Blob([data as any], { type: 'image/gif' });
     } catch (error) {
         // Clean up on error
         try {
