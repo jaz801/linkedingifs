@@ -27,6 +27,7 @@ export type RenderLineInput = {
   strokeColor: string;
   strokeWidth: number;
   endCap: LineEndCap;
+  isDotted?: boolean;
 };
 
 export type RenderObjectInput = {

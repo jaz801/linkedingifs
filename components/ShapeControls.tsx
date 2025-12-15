@@ -177,6 +177,8 @@ type ShapeControlsProps = {
   renderProgress: number;
   renderEtaSeconds: number | null;
   exportStatusLabel: string | null;
+  isDotted: boolean;
+  onToggleDotted: () => void;
 };
 
 const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
@@ -221,6 +223,8 @@ export function ShapeControls({
   renderProgress,
   renderEtaSeconds,
   exportStatusLabel,
+  isDotted,
+  onToggleDotted,
 }: ShapeControlsProps) {
   const formattedObjectColor = useMemo(
     () => color.replace('#', '').toUpperCase(),
@@ -391,6 +395,18 @@ export function ShapeControls({
               className="w-12 bg-transparent text-right text-sm font-semibold text-white outline-none"
             />
           </div>
+          <button
+            type="button"
+            onClick={onToggleDotted}
+            aria-pressed={isDotted}
+            disabled={isShapeControlsDisabled}
+            className={`flex h-9 items-center justify-center rounded-2xl border px-3 text-[10px] font-semibold uppercase tracking-wider transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isDotted
+              ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
+              : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
+              } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
+          >
+            Dotted
+          </button>
         </div>
       </section>
 

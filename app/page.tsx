@@ -320,6 +320,7 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
       strokeColor: line.strokeColor,
       strokeWidth: strokeWidthPx,
       endCap: line.endCap ?? 'line',
+      isDotted: line.isDotted,
     };
   });
 
@@ -471,6 +472,7 @@ export default function Home() {
   const [shapeCount, setShapeCount] = useState('1');
   const [isShapeAnimationEnabled, setIsShapeAnimationEnabled] = useState(true);
   const [lineEndCap, setLineEndCap] = useState<LineEndCap>('line');
+  const [isDotted, setIsDotted] = useState(false);
   const [canvasWidth, setCanvasWidth] = useState('1080');
   const [canvasHeight, setCanvasHeight] = useState('1080');
   const colorInputRef = useRef<HTMLInputElement>(null);
@@ -612,7 +614,9 @@ export default function Home() {
       setShape(null);
       setShapeCount('1');
       setIsShapeAnimationEnabled(true);
+      setIsShapeAnimationEnabled(true);
       setLineEndCap('line');
+      setIsDotted(false);
       return;
     }
 
@@ -621,6 +625,7 @@ export default function Home() {
     setIsShapeAnimationEnabled(selectedLine.animateShapes);
     setShapeColor(selectedLine.shapeColor.toUpperCase());
     setLineEndCap(selectedLine.endCap ?? 'line');
+    setIsDotted(selectedLine.isDotted ?? false);
   }, [selectedLine]);
 
   const openColorPicker = () => {
@@ -829,6 +834,16 @@ export default function Home() {
     const nextValue = !isShapeAnimationEnabled;
     setIsShapeAnimationEnabled(nextValue);
     updateSelectedLineProperties({ animateShapes: nextValue });
+  };
+
+  const handleToggleDotted = () => {
+    if (!selectedLine) {
+      return;
+    }
+
+    const nextValue = !isDotted;
+    setIsDotted(nextValue);
+    updateSelectedLineProperties({ isDotted: nextValue });
   };
 
   const showUploadNotice = useCallback((message: string) => {
@@ -1104,6 +1119,8 @@ export default function Home() {
           renderProgress={renderProgress}
           renderEtaSeconds={renderEtaSeconds}
           exportStatusLabel={exportStatusLabel}
+          isDotted={isDotted}
+          onToggleDotted={handleToggleDotted}
         />
       </main>
       <input

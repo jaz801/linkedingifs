@@ -247,6 +247,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
         shapeType: null,
         shapeCount: 1,
         animateShapes: true,
+        isDotted: false,
       };
 
       setLines((prevLines) => [...prevLines, nextLine]);
@@ -342,6 +343,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
             shapeType: null,
             shapeCount: 1,
             animateShapes: true,
+            isDotted: false,
           };
 
           setLines(prev => [...prev, newLine]);
@@ -734,6 +736,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
           | 'shapeCount'
           | 'animateShapes'
           | 'shapeColor'
+          | 'isDotted'
         >
       >,
     ) => {

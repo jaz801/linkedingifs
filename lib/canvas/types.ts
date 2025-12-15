@@ -57,12 +57,14 @@ export type LineSegment = {
   shapeCount: number;
   animateShapes: boolean;
   controlPoint: LinePoint | null; // Kept for 'line' tool compatibility
+  isDotted?: boolean;
 };
 
 export type DraftLine = {
   start: LinePoint;
   end: LinePoint;
   isShiftLocked: boolean;
+  isDotted?: boolean;
 };
 
 export type TranslateBounds = {

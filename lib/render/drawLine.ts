@@ -41,6 +41,7 @@ export type LinePath = {
 export type StaticLine = LinePath & {
   strokeColor: string;
   strokeWidth: number;
+  isDotted?: boolean;
 };
 
 const MIN_APPROXIMATION_STEPS = 12;
@@ -58,6 +59,9 @@ export function drawLine(ctx: CanvasLikeContext, line: StaticLine) {
     ctx.lineWidth = line.strokeWidth;
     if ('lineCap' in ctx && ctx.lineCap !== undefined) {
       ctx.lineCap = 'round';
+    }
+    if (line.isDotted && 'setLineDash' in ctx && typeof ctx.setLineDash === 'function') {
+      ctx.setLineDash([line.strokeWidth * 2, line.strokeWidth * 2]);
     }
 
     ctx.beginPath();

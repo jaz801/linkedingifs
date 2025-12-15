@@ -455,6 +455,7 @@ export function CanvasStage({
                       strokeWidth={line.strokeWidth}
                       strokeLinecap={line.endCap === 'arrow' ? 'butt' : 'round'}
                       strokeLinejoin={line.endCap === 'arrow' ? 'miter' : 'round'}
+                      strokeDasharray={line.isDotted ? `${line.strokeWidth * 0.1} ${line.strokeWidth * 2}` : undefined}
                       fill="none"
                       style={{
                         cursor: tool === 'arrow' ? 'grab' : 'default',
