@@ -44,7 +44,7 @@ import type { DraftLine, LineSegment } from '@/lib/canvas/types';
 import { approximateLineLength, computeArrowHeadDimensions } from '@/lib/render/arrowGeometry';
 
 type CanvasStageProps = {
-  tool: 'arrow' | 'line' | 'pen';
+  tool: 'arrow' | 'line' | 'pen' | 'square' | 'circle';
   canvasWidth: number;
   canvasHeight: number;
   color: string;
@@ -99,7 +99,7 @@ export function CanvasStage({
   );
 
   const buildLinePath = (line: LineSegment) => {
-    if (line.tool === 'pen' && line.points.length > 0) {
+    if ((line.tool === 'pen' || line.tool === 'square' || line.tool === 'circle') && line.points.length > 0) {
       const d = line.points.map((p, i) => {
         if (i === 0) return `M ${p.x} ${p.y}`;
         if (p.controlPoint) {
@@ -235,7 +235,7 @@ export function CanvasStage({
     }
 
     const count = Math.max(1, line.shapeCount);
-    const size = Math.max(1.5, line.strokeWidth * 1.5);
+    const size = line.objectSize ? Math.max(0.1, line.objectSize) : Math.max(1.5, line.strokeWidth * 1.5);
     const duration = 2.8;
 
     return Array.from({ length: count }).map((_, index) => {
@@ -327,22 +327,22 @@ export function CanvasStage({
   };
 
   const handleSurfacePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line' && tool !== 'pen') return;
+    if (tool !== 'line' && tool !== 'pen' && tool !== 'square' && tool !== 'circle') return;
     onSurfacePointerDown(event);
   };
 
   const handleSurfacePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line' && tool !== 'pen') return;
+    if (tool !== 'line' && tool !== 'pen' && tool !== 'square' && tool !== 'circle') return;
     onSurfacePointerMove(event);
   };
 
   const handleSurfacePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line' && tool !== 'pen') return;
+    if (tool !== 'line' && tool !== 'pen' && tool !== 'square' && tool !== 'circle') return;
     onSurfacePointerUp(event);
   };
 
   const handleSurfacePointerLeave = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (tool !== 'line' && tool !== 'pen') return;
+    if (tool !== 'line' && tool !== 'pen' && tool !== 'square' && tool !== 'circle') return;
     onSurfacePointerLeave(event);
   };
 
@@ -470,7 +470,7 @@ export function CanvasStage({
                       onPointerCancel={handleLinePointerCancel}
                     />
                     {renderLineEndCap(line)}
-                    {showHandles && line.tool !== 'pen' && (
+                    {showHandles && line.tool !== 'pen' && line.tool !== 'square' && line.tool !== 'circle' && (
                       <g>
                         <circle
                           data-line-id={line.id}
@@ -519,7 +519,7 @@ export function CanvasStage({
                         />
                       </g>
                     )}
-                    {showHandles && line.tool === 'pen' && (
+                    {showHandles && (line.tool === 'pen' || line.tool === 'square' || line.tool === 'circle') && (
                       <g>
                         {line.points.map((point, index) => (
                           <circle
@@ -579,17 +579,60 @@ export function CanvasStage({
                 );
               })}
               {draftLine && (
-                <line
-                  x1={draftLine.start.x}
-                  y1={draftLine.start.y}
-                  x2={draftLine.end.x}
-                  y2={draftLine.end.y}
-                  stroke={color}
-                  strokeOpacity={0.6}
-                  strokeWidth={lineWidth}
-                  strokeLinecap="round"
-                  strokeDasharray="2 2"
-                />
+                <>
+                  {(tool === 'square' || tool === 'circle') ? (
+                    (() => {
+                      const dx = draftLine.end.x - draftLine.start.x;
+                      const dy = draftLine.end.y - draftLine.start.y;
+                      const x = Math.min(draftLine.start.x, draftLine.end.x);
+                      const y = Math.min(draftLine.start.y, draftLine.end.y);
+                      const width = Math.abs(dx);
+                      const height = Math.abs(dy);
+
+                      if (tool === 'square') {
+                        return (
+                          <rect
+                            x={x}
+                            y={y}
+                            width={width}
+                            height={height}
+                            fill="none"
+                            stroke={color}
+                            strokeWidth={lineWidth}
+                            strokeOpacity={0.6}
+                          />
+                        );
+                      }
+
+                      // Circle (approximated as ellipse for draft, or circle if constrained)
+                      // Aspect ratio snap handles standard circle behavior
+                      return (
+                        <ellipse
+                          cx={x + width / 2}
+                          cy={y + height / 2}
+                          rx={width / 2}
+                          ry={height / 2}
+                          fill="none"
+                          stroke={color}
+                          strokeWidth={lineWidth}
+                          strokeOpacity={0.6}
+                        />
+                      );
+                    })()
+                  ) : (
+                    <line
+                      x1={draftLine.start.x}
+                      y1={draftLine.start.y}
+                      x2={draftLine.end.x}
+                      y2={draftLine.end.y}
+                      stroke={color}
+                      strokeOpacity={0.6}
+                      strokeWidth={lineWidth}
+                      strokeLinecap="round"
+                      strokeDasharray="2 2"
+                    />
+                  )}
+                </>
               )}
             </svg>
 

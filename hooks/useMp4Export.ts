@@ -1,11 +1,11 @@
 import { useState, useCallback } from 'react';
 import * as Mp4Muxer from 'mp4-muxer';
-import type { RenderGifPayload } from '@/lib/render/schema';
+import type { RenderGifPayload, RenderLineInput } from '@/lib/render/schema';
 import { drawLine } from '@/lib/render/drawLine';
-import { drawObjects } from '@/lib/render/drawObjects';
+import { drawObjects, calculateObjectPosition } from '@/lib/render/drawObjects';
 import type { CanvasLikeContext } from '@/lib/render/canvasContext';
 import { computeArrowHeadDimensions } from '@/lib/render/arrowGeometry';
-import { evaluateLinePoint, evaluateLineTangent } from '@/lib/render/geometry';
+import { evaluateLinePoint, evaluateLineTangent, normalizeProgress } from '@/lib/render/geometry';
 
 type UseMp4ExportOptions = {
     onProgress?: (progress: number) => void;
@@ -25,13 +25,18 @@ export function useMp4Export() {
         try {
             const { width, height, fps = 30, duration, lines, objects, background } = payload;
 
+            // Ensure dimensions are even numbers (required for many codecs)
+            // Round down to nearest even number to avoid white lines if we just floored
+            const exportWidth = Math.floor(width / 2) * 2;
+            const exportHeight = Math.floor(height / 2) * 2;
+
             // Prepare muxer
             const muxer = new Mp4Muxer.Muxer({
                 target: new Mp4Muxer.ArrayBufferTarget(),
                 video: {
                     codec: 'avc',
-                    width,
-                    height,
+                    width: exportWidth,
+                    height: exportHeight,
                 },
                 fastStart: 'in-memory',
             });
@@ -43,8 +48,8 @@ export function useMp4Export() {
 
             videoEncoder.configure({
                 codec: 'avc1.4d002a', // Main Profile, Level 4.2 (Supports 1080p @ 60fps)
-                width,
-                height,
+                width: exportWidth,
+                height: exportHeight,
                 bitrate: 4_000_000, // 4 Mbps for better quality
                 framerate: fps,
             });
@@ -52,8 +57,8 @@ export function useMp4Export() {
             // Prepare offscreen canvas for rendering
             // We use a regular canvas but don't attach it to DOM
             const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
+            canvas.width = exportWidth;
+            canvas.height = exportHeight;
             const ctx = canvas.getContext('2d', {
                 willReadFrequently: true,
                 alpha: false // MP4 doesn't support alpha usually, and we have a background
@@ -70,48 +75,96 @@ export function useMp4Export() {
                 img.src = background;
             });
 
-            // Prepare lines (calculate arrow heads etc once if possible, but drawLine handles it)
-            // Actually drawLine expects StaticLine which is slightly different from RenderLineInput
-            // We need to map RenderLineInput to what drawLine expects or update drawLine.
-            // drawLine takes StaticLine = LinePath & { strokeColor, strokeWidth }
-            // RenderLineInput has more fields.
-            // Also drawLine handles quadratic curves.
-
-            // We also need to handle Arrow Heads which drawLine might not handle fully 
-            // (route.ts handles them separately in drawLines).
-            // Let's replicate the drawLines logic from route.ts here or extract it too.
-            // For now, I'll implement the draw loop here using the shared helpers.
-
             const totalFrames = Math.round(duration * fps);
             const frameDurationMicroseconds = 1_000_000 / fps;
 
-            // Pre-calculate line info for object animation
-            const preparedLines = lines.map(line => ({ original: line }));
+            // NOTE: page.tsx already scales coordinates to pixels. We use lines directly.
+
+
+            const drawAnimatedShapes = (context: CanvasRenderingContext2D, line: RenderLineInput, frameIndex: number, totalFramesCount: number) => {
+                if (!line.shapeType || !line.animateShapes || (line.shapeCount || 0) <= 0) {
+                    return;
+                }
+
+                const count = Math.max(1, line.shapeCount || 1);
+                // line.objectSize is already scaled in page.tsx buildRenderPayload
+                const size = line.objectSize ? Math.max(0.1, line.objectSize) : Math.max(1.5, line.strokeWidth * 1.5);
+                const animDuration = 2.8; // Seconds, matching CanvasStage
+                const totalAnimFrames = Math.round(animDuration * fps);
+
+                // We need to loop count times to draw each shape instance
+                for (let index = 0; index < count; index++) {
+                    const beginDelay = (animDuration / count) * index;
+                    const timeOffset = index === 0 ? 0 : beginDelay;
+                    const currentTime = frameIndex / fps;
+                    const effectiveTime = (currentTime + timeOffset) % animDuration;
+                    const progress = effectiveTime / animDuration;
+
+                    const point = evaluateLinePoint(line, progress);
+                    const tangent = evaluateLineTangent(line, progress);
+                    const angle = Math.atan2(tangent.dy, tangent.dx);
+
+                    let opacity = 0;
+                    if (progress < 0.1) {
+                        opacity = progress / 0.1;
+                    } else if (progress < 0.9) {
+                        opacity = 1;
+                    } else {
+                        opacity = 1 - ((progress - 0.9) / 0.1);
+                    }
+
+                    if (opacity <= 0.01) continue;
+
+                    if (frameIndex % 30 === 0 && index === 0) {
+                        console.log(`Animated Shape Debug [Frame ${frameIndex}]`, {
+                            type: line.shapeType,
+                            at: point,
+                            opacity,
+                            progress
+                        });
+                    }
+
+                    context.save();
+                    context.translate(point.x, point.y);
+                    context.rotate(angle);
+                    context.globalAlpha = opacity;
+                    context.fillStyle = line.shapeColor || '#FFF';
+
+                    if (line.shapeType === 'circle') {
+                        context.beginPath();
+                        context.arc(0, 0, size / 2, 0, Math.PI * 2);
+                        context.fill();
+                    } else if (line.shapeType === 'square') {
+                        const half = size / 2;
+                        const rx = size * 0.15;
+                        context.beginPath();
+                        context.roundRect(-half, -half, size, size, rx);
+                        context.fill();
+                    } else if (line.shapeType === 'triangle') {
+                        const width = size;
+                        const height = size * 0.9;
+                        context.beginPath();
+                        context.moveTo(-width / 2, height / 2);
+                        context.lineTo(width / 2, 0);
+                        context.lineTo(-width / 2, -height / 2);
+                        context.closePath();
+                        context.fill();
+                    }
+
+                    context.restore();
+                }
+            };
 
             for (let i = 0; i < totalFrames; i++) {
+                if (i % 30 === 0 || i === 0) console.log(`Rendering Frame ${i}/${totalFrames}`);
+
                 // Clear and draw background
                 ctx.fillStyle = '#000';
-                ctx.fillRect(0, 0, width, height);
-                ctx.drawImage(bgImage, 0, 0, width, height);
+                ctx.fillRect(0, 0, exportWidth, exportHeight);
+                ctx.drawImage(bgImage, 0, 0, exportWidth, exportHeight);
 
                 // Draw Lines
                 lines.forEach(line => {
-                    // Draw the line path
-                    drawLine(ctx as unknown as CanvasLikeContext, {
-                        x1: line.x1,
-                        y1: line.y1,
-                        x2: line.x2,
-                        y2: line.y2,
-                        controlX: line.controlX,
-                        controlY: line.controlY,
-                        strokeColor: line.strokeColor,
-                        strokeWidth: line.strokeWidth,
-                        // drawLine doesn't handle 'points' (pen tool) yet? 
-                        // Wait, route.ts handles 'points' manually.
-                        // We need to handle pen tool points here too.
-                    });
-
-                    // Handle Pen Tool Points if present
                     if (line.points && line.points.length > 0) {
                         ctx.save();
                         ctx.beginPath();
@@ -119,6 +172,10 @@ export function useMp4Export() {
                         ctx.lineWidth = line.strokeWidth;
                         ctx.lineCap = 'round';
                         ctx.lineJoin = 'round';
+
+                        if (line.isDotted) {
+                            ctx.setLineDash([line.strokeWidth * 2, line.strokeWidth * 2]);
+                        }
 
                         line.points.forEach((p, idx) => {
                             if (idx === 0) {
@@ -131,8 +188,26 @@ export function useMp4Export() {
                                 }
                             }
                         });
+
+                        if (line.isClosed) {
+                            ctx.closePath();
+                        }
+
                         ctx.stroke();
                         ctx.restore();
+                    } else {
+                        // Draw the line path (fallback for simple lines)
+                        drawLine(ctx as unknown as CanvasLikeContext, {
+                            x1: line.x1,
+                            y1: line.y1,
+                            x2: line.x2,
+                            y2: line.y2,
+                            controlX: line.controlX,
+                            controlY: line.controlY,
+                            strokeColor: line.strokeColor,
+                            strokeWidth: line.strokeWidth,
+                            isDotted: line.isDotted,
+                        });
                     }
 
                     // Draw Arrow Head if needed
@@ -177,13 +252,16 @@ export function useMp4Export() {
                             }
                         }
                     }
+
+                    // Draw Animated Shapes (New Logic)
+                    drawAnimatedShapes(ctx, line, i, totalFrames);
                 });
 
-                // Draw Objects
+                // Draw Objects (Legacy support if 'objects' is populated, e.g. from older code or different features)
                 drawObjects(
                     ctx as unknown as CanvasLikeContext,
                     objects,
-                    preparedLines,
+                    lines.map(l => ({ original: l })),
                     i,
                     totalFrames
                 );

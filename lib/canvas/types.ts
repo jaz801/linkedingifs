@@ -30,6 +30,8 @@
 export type LinePoint = {
   x: number;
   y: number;
+  controlX?: number | null;
+  controlY?: number | null;
 };
 
 export type PathNode = LinePoint & {
@@ -43,7 +45,7 @@ export type LineEndCap = 'line' | 'arrow';
 export type LineSegment = {
   id: string;
   name: string;
-  tool: 'line' | 'pen'; // New field to distinguish tool type
+  tool: 'line' | 'pen' | 'square' | 'circle'; // New field to distinguish tool type
   start: LinePoint; // Kept for 'line' tool compatibility
   end: LinePoint;   // Kept for 'line' tool compatibility
   points: PathNode[]; // For 'pen' tool
@@ -56,6 +58,7 @@ export type LineSegment = {
   shapeType: LineShapeType | null;
   shapeCount: number;
   animateShapes: boolean;
+  objectSize: number; // New field for animated object size
   controlPoint: LinePoint | null; // Kept for 'line' tool compatibility
   isDotted?: boolean;
 };

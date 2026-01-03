@@ -28,6 +28,11 @@ export type RenderLineInput = {
   strokeWidth: number;
   endCap: LineEndCap;
   isDotted?: boolean;
+  shapeType?: 'circle' | 'square' | 'triangle' | null;
+  shapeCount?: number;
+  animateShapes?: boolean;
+  objectSize?: number;
+  shapeColor?: string;
 };
 
 export type RenderObjectInput = {

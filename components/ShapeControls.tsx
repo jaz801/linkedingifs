@@ -179,9 +179,11 @@ type ShapeControlsProps = {
   exportStatusLabel: string | null;
   isDotted: boolean;
   onToggleDotted: () => void;
+  objectSize: string;
+  onObjectSizeChange: (event: ChangeEvent<HTMLInputElement>) => void;
 };
 
-const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
+const shapeTypes: Array<LineShapeType> = ['circle', 'square'];
 const endCapOptions: Array<LineEndCap> = ['line', 'arrow'];
 
 export function ShapeControls({
@@ -225,6 +227,8 @@ export function ShapeControls({
   exportStatusLabel,
   isDotted,
   onToggleDotted,
+  objectSize,
+  onObjectSizeChange,
 }: ShapeControlsProps) {
   const formattedObjectColor = useMemo(
     () => color.replace('#', '').toUpperCase(),
@@ -245,6 +249,50 @@ export function ShapeControls({
   const [showMp4Options, setShowMp4Options] = useState(false);
   const [mp4Loops, setMp4Loops] = useState(1);
   const exportMenuRef = useRef<HTMLDivElement>(null);
+
+  // Shape menu state
+  const [isShapeMenuOpen, setIsShapeMenuOpen] = useState(false);
+  const menuTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (menuTimerRef.current) {
+        clearTimeout(menuTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleShapeMenuToggle = () => {
+    setIsShapeMenuOpen((prev) => {
+      const nextState = !prev;
+
+      // Clear any existing timer
+      if (menuTimerRef.current) {
+        clearTimeout(menuTimerRef.current);
+        menuTimerRef.current = null;
+      }
+
+      if (nextState) {
+        // If opening, start 3s timer to auto-close
+        menuTimerRef.current = setTimeout(() => {
+          setIsShapeMenuOpen(false);
+        }, 3000);
+      }
+
+      return nextState;
+    });
+  };
+
+  const handleShapeSelect = (type: LineShapeType) => {
+    onSelectShape(type);
+    setIsShapeMenuOpen(false);
+
+    if (menuTimerRef.current) {
+      clearTimeout(menuTimerRef.current);
+      menuTimerRef.current = null;
+    }
+  };
 
   // Default duration for calculating total video duration
   const DEFAULT_DURATION_SECONDS = 2.8;
@@ -412,25 +460,39 @@ export function ShapeControls({
 
       <section className="flex flex-col gap-2.5">
         <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">Shape</span>
-        <div className="flex flex-wrap items-center gap-2">
-          {shapeTypes.map((type) => {
-            const isActive = shape === type;
-            return (
-              <button
-                key={type}
-                type="button"
-                onClick={() => onSelectShape(type)}
-                aria-label={`Select ${type}`}
-                disabled={isShapeControlsDisabled}
-                className={`flex h-9 w-9 items-center justify-center rounded-2xl border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isActive
-                  ? 'border-white bg-white text-stone-900 shadow-lg shadow-white/40'
-                  : 'border-white/10 bg-white/5 text-white/70 hover:border-white/30 hover:bg-white/10 hover:text-white'
-                  } ${isShapeControlsDisabled ? 'cursor-not-allowed opacity-40 hover:border-white/10 hover:bg-white/5 hover:text-white/60' : ''}`}
-              >
-                {renderShapeIcon(type)}
-              </button>
-            );
-          })}
+        <div className="relative">
+          {/* Main Active Shape Button */}
+          <button
+            type="button"
+            onClick={handleShapeMenuToggle}
+            aria-label="Toggle shape menu"
+            aria-expanded={isShapeMenuOpen}
+            className={`flex h-9 w-9 items-center justify-center rounded-2xl border bg-white/5 text-white shadow-lg transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isShapeControlsDisabled && !shape // If disabled AND no shape selected (wait, shape drives the icon. If no shape selected, what icon?)
+              ? 'border-white/10 opacity-70' // Visual cue it's "inactive" but clickable
+              : 'border-white/20 hover:border-white/40'
+              }`}
+          >
+            {renderShapeIcon(shape || 'square')}
+          </button>
+
+          {/* Expanded Menu / Hover Effect */}
+          {isShapeMenuOpen && (
+            <div className="absolute left-0 bottom-full mb-2 flex flex-col gap-2 rounded-2xl border border-white/10 bg-stone-900/90 p-1.5 shadow-xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 z-20">
+              {shapeTypes
+                .filter((type) => type !== shape)
+                .map((type) => (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => handleShapeSelect(type)}
+                    aria-label={`Select ${type}`}
+                    className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/5 bg-white/5 text-white/70 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                  >
+                    {renderShapeIcon(type)}
+                  </button>
+                ))}
+            </div>
+          )}
         </div>
       </section>
 
@@ -519,6 +581,22 @@ export function ShapeControls({
                 </svg>
               </button>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-2.5">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/50">Object Size</span>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2">
+            <input
+              type="number"
+              min={1}
+              value={objectSize}
+              onChange={onObjectSizeChange}
+              disabled={isShapeControlsDisabled}
+              className="w-12 bg-transparent text-center text-sm font-semibold text-white outline-none"
+            />
           </div>
         </div>
       </section>
@@ -670,7 +748,7 @@ export function ShapeControls({
                       <button
                         type="button"
                         onClick={handleExportMp4Click}
-                        className="flex-1 rounded-xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg transition hover:shadow-xl"
+                        className="flex-1 rounded-xl border border-white bg-white px-3 py-2 text-[11px] font-semibold text-stone-900 shadow-lg shadow-white/50 transition hover:shadow-xl"
                       >
                         Export
                       </button>

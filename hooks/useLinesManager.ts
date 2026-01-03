@@ -76,6 +76,7 @@ import type {
   LinePoint,
   LineSegment,
   TranslateBounds,
+  PathNode,
 } from '@/lib/canvas/types';
 
 type UseLinesManagerOptions = {
@@ -118,7 +119,9 @@ const resolveDragLineIndex = (lines: LineSegment[], state: DragState) => {
   return fallbackIndex;
 };
 
-export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLinesManagerOptions & { tool: 'arrow' | 'line' | 'pen' }) {
+export type ToolType = 'arrow' | 'line' | 'pen' | 'square' | 'circle';
+
+export function useLinesManager({ color, lineWidth, shapeColor, tool, objectSize }: UseLinesManagerOptions & { tool: ToolType; objectSize: number }) {
   const drawingSurfaceRef = useRef<HTMLDivElement>(null);
   const [lines, setLines] = useState<LineSegment[]>([]);
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
@@ -219,7 +222,28 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
       const current = draftLineRef.current;
       if (!current) return;
 
-      const finalEnd = shiftKey ? { x: endPoint.x, y: current.start.y } : endPoint;
+      let finalEnd = endPoint;
+      if (shiftKey) {
+        const dx = endPoint.x - current.start.x;
+        const dy = endPoint.y - current.start.y;
+
+        if (tool === 'line' || tool === 'arrow' || tool === 'pen') {
+          // Flatten/Ortho snap logic
+          if (Math.abs(dx) > Math.abs(dy)) {
+            finalEnd = { x: endPoint.x, y: current.start.y };
+          } else {
+            finalEnd = { x: current.start.x, y: endPoint.y };
+          }
+        } else if (tool === 'square' || tool === 'circle') {
+          // 1:1 Aspect Ratio
+          const size = Math.max(Math.abs(dx), Math.abs(dy));
+          finalEnd = {
+            x: current.start.x + (dx >= 0 ? size : -size),
+            y: current.start.y + (dy >= 0 ? size : -size),
+          };
+        }
+      }
+
       const deltaX = finalEnd.x - current.start.x;
       const deltaY = finalEnd.y - current.start.y;
 
@@ -230,14 +254,84 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
 
       lineCounterRef.current += 1;
       const nextCount = lineCounterRef.current;
+
+      let points: PathNode[] = [];
+      let isClosed = false;
+
+      if (tool === 'square') {
+        // Generate rectangle points
+        // TL -> TR -> BR -> BL
+        const x1 = current.start.x;
+        const y1 = current.start.y;
+        const x2 = finalEnd.x;
+        const y2 = finalEnd.y;
+
+        points = [
+          { x: x1, y: y1 },
+          { x: x2, y: y1 },
+          { x: x2, y: y2 },
+          { x: x1, y: y2 }
+        ];
+        isClosed = true;
+      } else if (tool === 'circle') {
+        const x1 = Math.min(current.start.x, finalEnd.x);
+        const y1 = Math.min(current.start.y, finalEnd.y);
+        const w = Math.abs(finalEnd.x - current.start.x);
+        const h = Math.abs(finalEnd.y - current.start.y);
+        const rx = w / 2;
+        const ry = h / 2;
+        const cx = x1 + rx;
+        const cy = y1 + ry;
+
+        // 4 Segments: Right -> Bottom -> Left -> Top -> Right
+        // We use control points to approximate the circle (squircle/oval).
+        // The controlPoint property on a node belongs to the segment ENDING at that node.
+        // So for the first point (start), we don't have a control point.
+        // For subsequent points, we define the control point that leads to them.
+
+        points = [
+          { x: cx + rx, y: cy }, // Start (Right) - MoveTo
+          {
+            x: cx,
+            y: cy + ry,
+            controlPoint: { x: cx + rx, y: cy + ry }
+          }, // Bottom (Curve from Right to Bottom, CP at BR)
+          {
+            x: cx - rx,
+            y: cy,
+            controlPoint: { x: cx - rx, y: cy + ry }
+          }, // Left (Curve from Bottom to Left, CP at BL)
+          {
+            x: cx,
+            y: cy - ry,
+            controlPoint: { x: cx - rx, y: cy - ry }
+          }, // Top (Curve from Left to Top, CP at TL)
+          {
+            x: cx + rx,
+            y: cy,
+            controlPoint: { x: cx + rx, y: cy - ry }
+          }, // Right (Curve from Top to Right, CP at TR)
+        ];
+        isClosed = true;
+      }
+
       const nextLine: LineSegment = {
         id: `line-${nextCount}`,
-        name: `Line ${nextCount}`,
-        tool: 'line',
+        name: tool === 'square' ? `Square ${nextCount}` : tool === 'circle' ? `Circle ${nextCount}` : `Line ${nextCount}`,
+        tool: (tool === 'line' || tool === 'arrow') ? 'line' : (tool === 'pen' ? 'pen' : (tool === 'square' ? 'square' : (tool === 'circle' ? 'circle' : 'line'))),
+        // Actually, schema.ts LineSegment doesn't strictly enum tools.
+        // But `drawObjects` etc don't care about tool.
+        // `useLinesManager` state has `tool: string`.
+        // Let's store the tool name if it fits.
+        // Existing code: tool: 'arrow' | 'line' | 'pen'.
+        // I should keep `tool: 'line'` for shapes so they behave like lines?
+        // Or extend `LineSegment['tool']`.
+        // Let's extend logic to use 'shape' or keep 'line'.
+        // If I use 'line', `isClosed` handles the shape nature.
         start: current.start,
         end: finalEnd,
-        points: [],
-        isClosed: false,
+        points: points,
+        isClosed: isClosed,
         controlPoint: null,
         stackOrder: nextCount,
         strokeColor: color.toUpperCase(),
@@ -247,6 +341,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
         shapeType: null,
         shapeCount: 1,
         animateShapes: true,
+        objectSize: objectSize,
         isDotted: false,
       };
 
@@ -254,7 +349,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
       setSelectedLineId(nextLine.id);
       updateDraftLine(null);
     },
-    [color, lineWidth, shapeColor, updateDraftLine],
+    [color, lineWidth, shapeColor, updateDraftLine, tool],
   );
 
   const handleSurfacePointerDown: SurfacePointerHandler = useCallback(
@@ -343,6 +438,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
             shapeType: null,
             shapeCount: 1,
             animateShapes: true,
+            objectSize: objectSize,
             isDotted: false,
           };
 
@@ -379,13 +475,35 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
       const nextEnd = getRelativePoint(event);
       const isShiftLocked = event.shiftKey || current.isShiftLocked;
 
+      let finalEnd = nextEnd;
+      if (isShiftLocked) {
+        const dx = nextEnd.x - current.start.x;
+        const dy = nextEnd.y - current.start.y;
+
+        if (tool === 'line' || tool === 'arrow' || tool === 'pen') {
+          // Ortho snap
+          if (Math.abs(dx) > Math.abs(dy)) {
+            finalEnd = { x: nextEnd.x, y: current.start.y };
+          } else {
+            finalEnd = { x: current.start.x, y: nextEnd.y };
+          }
+        } else if (tool === 'square' || tool === 'circle') {
+          // 1:1 Aspect Ratio
+          const size = Math.max(Math.abs(dx), Math.abs(dy));
+          finalEnd = {
+            x: current.start.x + (dx >= 0 ? size : -size),
+            y: current.start.y + (dy >= 0 ? size : -size)
+          };
+        }
+      }
+
       updateDraftLine({
         start: current.start,
-        end: isShiftLocked ? { x: nextEnd.x, y: current.start.y } : nextEnd,
+        end: finalEnd,
         isShiftLocked,
       });
     },
-    [getRelativePoint, updateDraftLine],
+    [getRelativePoint, updateDraftLine, tool],
   );
 
   const handleSurfacePointerUp: SurfacePointerHandler = useCallback(
@@ -487,6 +605,91 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
           const existing = prevLines[resolvedIndex];
           if (!existing.points || !existing.points[dragState.pointIndex!]) return prevLines;
 
+          // Scaling Logic for Shapes
+          if (event.shiftKey && (existing.tool === 'square' || existing.tool === 'circle')) {
+            const points = existing.points;
+            if (points.length < 4) return prevLines; // Shapes need at least 4 points
+
+            let anchorIndex = -1;
+            const idx = dragState.pointIndex!;
+
+            if (existing.tool === 'square') {
+              // Square: 0:TL, 1:TR, 2:BR, 3:BL
+              // Anchor is opposite corner
+              anchorIndex = (idx + 2) % 4;
+            } else if (existing.tool === 'circle') {
+              // Circle: 5 points (0=Right, 1=Bottom, 2=Left, 3=Top, 4=Right)
+              // Cardinal dragging
+              // If dragging 0 or 4 (R) -> Anchor 2 (L)
+              // If dragging 1 (B) -> Anchor 3 (T)
+              // If dragging 2 (L) -> Anchor 0 (R)
+              // If dragging 3 (T) -> Anchor 1 (B)
+              if (idx === 0 || idx === 4) anchorIndex = 2;
+              else if (idx === 1) anchorIndex = 3;
+              else if (idx === 2) anchorIndex = 0;
+              else if (idx === 3) anchorIndex = 1;
+            }
+
+            if (anchorIndex !== -1 && points[anchorIndex]) {
+              const anchor = points[anchorIndex];
+              const originalPoint = points[idx];
+
+              // Vector from anchor to original draggable point
+              const vOriginalX = originalPoint.x - anchor.x;
+              const vOriginalY = originalPoint.y - anchor.y;
+              const originalDist = Math.hypot(vOriginalX, vOriginalY);
+
+              // Vector from anchor to current mouse position
+              const vCurrentX = nextPointer.x - anchor.x;
+              const vCurrentY = nextPointer.y - anchor.y;
+              const currentDist = Math.hypot(vCurrentX, vCurrentY);
+
+              if (originalDist < 0.001) return prevLines; // Avoid div by zero
+
+              // Determine scale factor
+              // We can just use the ratio of distances for simple uniform scaling
+              // To handle direction, we can project current onto original vector, but visual dragging
+              // usually implies just magnitude scaling if we want to follow the mouse "outward" or "inward"
+              // Correct logic using projection to allow "negative" scale if flipped?
+              // For now, assume positive scale magnitude (resizing, not flipping handled here simplified)
+
+              // Better: Project vCurrent onto vOriginal to find how far along the original diagonal we are
+              const dot = vCurrentX * vOriginalX + vCurrentY * vOriginalY;
+              const scale = dot / (originalDist * originalDist);
+
+              // Apply scale to ALL points relative to anchor
+              const nextPoints = points.map(p => {
+                const dx = p.x - anchor.x;
+                const dy = p.y - anchor.y;
+                let newControl: { x: number, y: number } | undefined = undefined;
+
+                if (p.controlPoint) {
+                  const cdx = p.controlPoint.x - anchor.x;
+                  const cdy = p.controlPoint.y - anchor.y;
+                  newControl = {
+                    x: anchor.x + cdx * scale,
+                    y: anchor.y + cdy * scale
+                  };
+                }
+
+                return {
+                  ...p,
+                  x: anchor.x + dx * scale,
+                  y: anchor.y + dy * scale,
+                  controlPoint: newControl
+                };
+              });
+
+              const nextLines = prevLines.slice();
+              nextLines[resolvedIndex] = {
+                ...existing,
+                points: nextPoints
+              };
+              return nextLines;
+            }
+          }
+
+          // Fallback to standard point dragging
           const nextLines = prevLines.slice();
           const nextPoints = [...existing.points];
           nextPoints[dragState.pointIndex!] = {
@@ -737,6 +940,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool }: UseLines
           | 'animateShapes'
           | 'shapeColor'
           | 'isDotted'
+          | 'objectSize'
         >
       >,
     ) => {

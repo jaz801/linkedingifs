@@ -301,13 +301,24 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
     const normalizedStrokeWidth = Math.max(MIN_LINE_WIDTH, line.strokeWidth);
     const strokeWidthPx = normalizedStrokeWidth * averageScale;
 
-    // Pen tool: convert all points with exact precision
-    const points = line.tool === 'pen' ? line.points.map(p => ({
+    // Pen, Square, Circle tools: convert all points with exact precision
+    const points = (line.tool === 'pen' || line.tool === 'square' || line.tool === 'circle') ? line.points.map(p => ({
       x: p.x * scaleX,
       y: p.y * scaleY,
       controlX: p.controlPoint ? p.controlPoint.x * scaleX : undefined,
       controlY: p.controlPoint ? p.controlPoint.y * scaleY : undefined,
     })) : undefined;
+
+    // Pass shape properties directly to the line payload
+    // We handle object rendering intrinsically now to match UI perfectly
+    const shapeType = line.shapeType;
+    const shapeCount = line.shapeCount;
+    const animateShapes = line.animateShapes;
+    const shapeColor = line.shapeColor;
+
+    // Scale object size just like stroke width
+    const baseObjectSize = line.objectSize ? line.objectSize : Math.max(1.5, line.strokeWidth * 1.5);
+    const objectSizePx = Math.max(1, baseObjectSize * averageScale);
 
     return {
       x1,
@@ -321,36 +332,20 @@ function buildRenderPayload({ width, height, background, lines }: BuildRenderPay
       strokeWidth: strokeWidthPx,
       endCap: line.endCap ?? 'line',
       isDotted: line.isDotted,
+      isClosed: line.isClosed,
+      shapeType,
+      shapeCount,
+      animateShapes,
+      objectSize: objectSizePx,
+      shapeColor,
     };
   });
 
   const objects: RenderObjectInput[] = [];
 
-  renderLines.forEach((_, index) => {
-    const source = lines[index];
-    if (!source) return;
-
-    const objectType = mapShapeTypeToObjectType(source.shapeType);
-    if (!objectType || !source.animateShapes || source.shapeCount <= 0) {
-      return;
-    }
-
-    const count = Math.max(1, source.shapeCount);
-    const baseSizeUnits = Math.max(1.5, source.strokeWidth * 1.5);
-    const sizePx = Math.max(1, baseSizeUnits * averageScale);
-
-    for (let offsetIndex = 0; offsetIndex < count; offsetIndex += 1) {
-      objects.push({
-        lineIndex: index,
-        type: objectType,
-        color: source.shapeColor,
-        size: sizePx,
-        speed: 1,
-        direction: 'forward',
-        offset: (offsetIndex / count) % 1,
-      });
-    }
-  });
+  // LEGACY: We no longer populate 'objects' for intrinsic shape animation.
+  // The rendering logic in useMp4Export (and backend) now handles this via line properties.
+  // We keep the array empty or strictly for non-intrinsic objects if we add them later.
 
   return {
     width,
@@ -470,6 +465,7 @@ export default function Home() {
   );
   const [shape, setShape] = useState<LineShapeType | null>(null);
   const [shapeCount, setShapeCount] = useState('1');
+  const [objectSize, setObjectSize] = useState('2.5'); // Default size 2.5
   const [isShapeAnimationEnabled, setIsShapeAnimationEnabled] = useState(true);
   const [lineEndCap, setLineEndCap] = useState<LineEndCap>('line');
   const [isDotted, setIsDotted] = useState(false);
@@ -477,13 +473,21 @@ export default function Home() {
   const [canvasHeight, setCanvasHeight] = useState('1080');
   const colorInputRef = useRef<HTMLInputElement>(null);
   const shapeColorInputRef = useRef<HTMLInputElement>(null);
-  const [tool, setTool] = useState<'arrow' | 'line' | 'pen'>('arrow');
+  const [tool, setTool] = useState<'arrow' | 'line' | 'pen' | 'square' | 'circle'>('arrow');
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [canvasBackground, setCanvasBackground] = useState<CanvasBackground | null>(null);
   const [exportFilename, setExportFilename] = useState('animation');
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const uploadNoticeTimeoutRef = useRef<number | null>(null);
   const [preparedBackground, setPreparedBackground] = useState<string | null>(null);
+  const [isObjectSizeManuallySet, setIsObjectSizeManuallySet] = useState(false);
+
+  const handleToolSelect = (nextTool: 'arrow' | 'line' | 'pen' | 'square' | 'circle') => {
+    setTool(nextTool);
+    if (nextTool === 'arrow') {
+      updateDraftLine(null);
+    }
+  };
 
   const {
     renderProgress,
@@ -525,7 +529,13 @@ export default function Home() {
     undoLastLine,
     updateSelectedLineProperties,
     updateDraftLine,
-  } = useLinesManager({ color, lineWidth, shapeColor, tool });
+  } = useLinesManager({
+    color,
+    lineWidth,
+    shapeColor,
+    tool,
+    objectSize: parseFloat(objectSize) || 2.5,
+  });
 
   useEffect(() => {
     if (!selectedLine) {
@@ -538,6 +548,7 @@ export default function Home() {
     setLineWidth(normalizedWidth);
     setLineWidthInputValue(formatLineWidthDisplay(normalizedWidth));
     setLineEndCap(selectedLine.endCap ?? 'line');
+    setIsDotted(selectedLine.isDotted ?? false);
   }, [selectedLine]);
 
   useEffect(() => {
@@ -613,7 +624,8 @@ export default function Home() {
     if (!selectedLine) {
       setShape(null);
       setShapeCount('1');
-      setIsShapeAnimationEnabled(true);
+      setObjectSize('2.5');
+      setIsObjectSizeManuallySet(false);
       setIsShapeAnimationEnabled(true);
       setLineEndCap('line');
       setIsDotted(false);
@@ -622,6 +634,12 @@ export default function Home() {
 
     setShape(selectedLine.shapeType);
     setShapeCount(String(selectedLine.shapeCount));
+    setObjectSize(String(selectedLine.objectSize ?? 2.5));
+    // If we're loading a selected line, we assume the size matters as is, so we treat it as "set"
+    // to prevent accidental overwrite by changing line width immediately? 
+    // Or should reset manual flag? If it's a new selection, we should probably set manual to true 
+    // to preserve its specific size against line width changes.
+    setIsObjectSizeManuallySet(true);
     setIsShapeAnimationEnabled(selectedLine.animateShapes);
     setShapeColor(selectedLine.shapeColor.toUpperCase());
     setLineEndCap(selectedLine.endCap ?? 'line');
@@ -695,9 +713,16 @@ export default function Home() {
       const candidate = parsed <= 0 ? MIN_LINE_WIDTH : parsed;
       const normalized = clampLineWidth(candidate);
       setLineWidth(normalized);
-      updateSelectedLineProperties({ strokeWidth: normalized });
+
+      if (!isObjectSizeManuallySet) {
+        const proportionalSize = Math.max(0.1, normalized * 2.5);
+        setObjectSize(String(proportionalSize));
+        updateSelectedLineProperties({ strokeWidth: normalized, objectSize: proportionalSize });
+      } else {
+        updateSelectedLineProperties({ strokeWidth: normalized });
+      }
     },
-    [parseLineWidthInput, updateSelectedLineProperties],
+    [parseLineWidthInput, updateSelectedLineProperties, isObjectSizeManuallySet],
   );
 
   const normalizeLineWidth = () => {
@@ -720,6 +745,19 @@ export default function Home() {
     }
 
     updateSelectedLineProperties({ shapeCount: Math.floor(parsed) });
+  };
+
+  const handleObjectSizeChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const value = event.target.value;
+    setObjectSize(value); // Allow typing freely
+    setIsObjectSizeManuallySet(true);
+
+    const size = parseFloat(value);
+    if (!selectedLine || isNaN(size) || size <= 0) {
+      return;
+    }
+
+    updateSelectedLineProperties({ objectSize: size });
   };
 
   const clampShapeCount = () => {
@@ -800,21 +838,23 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleUndoKey);
   }, [undoLastLine]);
 
-  const handleToolSelect = (nextTool: 'arrow' | 'line' | 'pen') => {
-    setTool(nextTool);
-    if (nextTool === 'arrow') {
-      updateDraftLine(null);
-    }
-  };
+
 
   const handleSelectShape = (nextShape: LineShapeType) => {
-    if (!selectedLine) {
-      return;
+    // If no line is selected, or we want to switch drawing modes:
+    // Set the global tool state to the shape name
+    if (nextShape === 'square' || nextShape === 'circle') {
+      setTool(nextShape);
+      setShape(nextShape); // Update UI icon
+      updateDraftLine(null);
     }
 
-    const resolvedShape = shape === nextShape ? null : nextShape;
-    setShape(resolvedShape);
-    updateSelectedLineProperties({ shapeType: resolvedShape });
+    // If a line is selected, ALSO update its property
+    if (selectedLine) {
+      const resolvedShape = shape === nextShape ? null : nextShape;
+      setShape(resolvedShape);
+      updateSelectedLineProperties({ shapeType: resolvedShape });
+    }
   };
 
   const handleSelectLineEndCap = (nextEndCap: LineEndCap) => {
@@ -1108,6 +1148,8 @@ export default function Home() {
           isAnimationEnabled={isShapeAnimationEnabled}
           onToggleAnimation={handleToggleShapeAnimation}
           onSelectLineEndCap={handleSelectLineEndCap}
+          objectSize={objectSize}
+          onObjectSizeChange={handleObjectSizeChange}
           onRequestUpload={handleRequestUpload}
           onExportMp4={handleExportMp4}
           onExportGif={handleExportGif}

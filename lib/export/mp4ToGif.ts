@@ -87,62 +87,97 @@ export async function convertMp4ToGif(
         });
     }
 
+    const logs: string[] = [];
+    ffmpeg.on('log', ({ message }) => {
+        logs.push(message);
+        console.log('[FFmpeg Log]:', message);
+    });
+
     try {
         // Write input MP4 to virtual filesystem
         const inputName = 'input.mp4';
         const outputName = 'output.gif';
 
+        console.log('[Mp4ToGif] Input Blob Size:', mp4Blob.size);
         await ffmpeg.writeFile(inputName, await fetchFile(mp4Blob));
 
-        // Build FFmpeg command
-        // -i input.mp4: input file
-        // -vf: video filters
-        //   - fps=X: set frame rate
-        //   - scale=X:Y: resize (optional)
-        //   - split: split stream for palette generation
-        //   - palettegen: generate optimal color palette
-        //   - paletteuse: apply palette for better quality
-        // -loop 0: loop forever
-        const filters: string[] = [`fps=${fps}`];
+        // Attempt 1: High Quality with Palette Generation
+        try {
+            console.log('[Mp4ToGif] Attempting high-quality conversion...');
 
-        if (scale) {
-            filters.push(`scale=${scale}:flags=lanczos`);
+            const filters: string[] = [`fps=${fps}`];
+            if (scale) {
+                filters.push(`scale=${scale}:flags=lanczos`);
+            }
+            // Use palette generation for better quality GIFs
+            filters.push('split[s0][s1]');
+            filters.push('[s0]palettegen[p]');
+            filters.push('[s1][p]paletteuse');
+
+            const args = [
+                '-i', inputName,
+                '-vf', filters.join(';'),
+                '-loop', '0',
+                outputName
+            ];
+
+            const retCode = await ffmpeg.exec(args);
+            console.log('[Mp4ToGif] HQ FFmpeg exit code:', retCode);
+
+            if (retCode !== 0) {
+                throw new Error(`FFmpeg HQ exited with code ${retCode}`);
+            }
+
+            const data = await ffmpeg.readFile(outputName);
+            if (data instanceof Uint8Array && data.length > 0) {
+                // Success! Clean up input only (output is in memory)
+                await ffmpeg.deleteFile(inputName);
+                await ffmpeg.deleteFile(outputName);
+                return new Blob([data as any], { type: 'image/gif' });
+            }
+            console.warn('[Mp4ToGif] HQ conversion produced empty data, falling back to SQ...');
+        } catch (e) {
+            console.warn('[Mp4ToGif] HQ conversion failed:', e, 'Falling back to SQ...');
         }
 
-        // Use palette generation for better quality GIFs
-        filters.push('split[s0][s1]');
-        filters.push('[s0]palettegen[p]');
-        filters.push('[s1][p]paletteuse');
+        // Attempt 2: Standard Quality (Simple filter chain)
+        // Cleanup previous output failure if any
+        try { await ffmpeg.deleteFile(outputName); } catch { }
 
-        const args = [
+        console.log('[Mp4ToGif] Attempting standard-quality conversion...');
+        const simpleFilters: string[] = [`fps=${fps}`];
+        if (scale) {
+            simpleFilters.push(`scale=${scale}:flags=lanczos`);
+        }
+
+        const simpleArgs = [
             '-i', inputName,
-            '-vf', filters.join(';'),
+            '-vf', simpleFilters.join(','), // Simple chain uses comma
             '-loop', '0',
             outputName
         ];
 
-        // Run conversion
-        await ffmpeg.exec(args);
+        const retCodeSimple = await ffmpeg.exec(simpleArgs);
+        console.log('[Mp4ToGif] SQ FFmpeg exit code:', retCodeSimple);
 
-        // Read output GIF from virtual filesystem
+        if (retCodeSimple !== 0) {
+            throw new Error(`FFmpeg SQ exited with code ${retCodeSimple}. Last logs: ${logs.slice(-5).join('\n')}`);
+        }
+
         const data = await ffmpeg.readFile(outputName);
 
         // Clean up virtual filesystem
         await ffmpeg.deleteFile(inputName);
         await ffmpeg.deleteFile(outputName);
 
-        // Convert FileData (Uint8Array or string) to Blob
-        // ffmpeg.readFile returns FileData which is Uint8Array for binary files
         if (!(data instanceof Uint8Array)) {
             throw new Error('Expected binary data from ffmpeg');
         }
 
-        // Ensure we have valid data
         if (data.length === 0) {
-            throw new Error('FFmpeg conversion resulted in empty GIF data');
+            throw new Error(`FFmpeg SQ conversion resulted in empty GIF data. RAM usage: ${logs.filter(l => l.includes('kB')).slice(-1)}`);
         }
 
-        // Create blob from the Uint8Array directly (Uint8Array is a valid BlobPart)
         return new Blob([data as any], { type: 'image/gif' });
     } catch (error) {
         // Clean up on error
@@ -151,6 +186,11 @@ export async function convertMp4ToGif(
             await ffmpeg.deleteFile('output.gif');
         } catch {
             // Ignore cleanup errors
+        }
+
+        // Enhance error with logs if available
+        if (error instanceof Error) {
+            console.error('[Mp4ToGif] Full FFmpeg logs:', logs.join('\n'));
         }
         throw error;
     }
