@@ -578,6 +578,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool, objectSize
         translateBounds: targetHandle === 'translate' ? computeTranslateBounds(line) : null,
         pointIndex,
         pointStart: pointIndex !== undefined && line.points[pointIndex] ? { ...line.points[pointIndex] } : undefined,
+        originalPoints: line.points ? line.points.map(p => ({ ...p, controlPoint: p.controlPoint ? { ...p.controlPoint } : undefined })) : undefined,
       };
 
       const target = event.currentTarget;
@@ -607,7 +608,7 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool, objectSize
 
           // Scaling Logic for Shapes
           if (event.shiftKey && (existing.tool === 'square' || existing.tool === 'circle')) {
-            const points = existing.points;
+            const points = dragState.originalPoints || existing.points;
             if (points.length < 4) return prevLines; // Shapes need at least 4 points
 
             let anchorIndex = -1;
@@ -748,12 +749,24 @@ export function useLinesManager({ color, lineWidth, shapeColor, tool, objectSize
 
           const existing = prevLines[resolvedIndex];
 
-          // Handle Pen Path Translation
-          if (existing.tool === 'pen') {
+          // Handle Pen/Shape Path Translation
+          if (existing.tool === 'pen' || existing.tool === 'square' || existing.tool === 'circle') {
             const nextLines = prevLines.slice();
             nextLines[resolvedIndex] = {
               ...existing,
-              points: existing.points.map(p => ({
+              start: {
+                x: existing.start.x + deltaX,
+                y: existing.start.y + deltaY,
+              },
+              end: {
+                x: existing.end.x + deltaX,
+                y: existing.end.y + deltaY,
+              },
+              controlPoint: existing.controlPoint ? {
+                x: existing.controlPoint.x + deltaX,
+                y: existing.controlPoint.y + deltaY,
+              } : null,
+              points: (dragState.originalPoints || existing.points).map(p => ({
                 ...p,
                 x: p.x + deltaX,
                 y: p.y + deltaY,

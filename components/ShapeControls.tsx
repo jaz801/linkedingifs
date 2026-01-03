@@ -183,7 +183,7 @@ type ShapeControlsProps = {
   onObjectSizeChange: (event: ChangeEvent<HTMLInputElement>) => void;
 };
 
-const shapeTypes: Array<LineShapeType> = ['circle', 'square'];
+const shapeTypes: Array<LineShapeType> = ['circle', 'square', 'triangle'];
 const endCapOptions: Array<LineEndCap> = ['line', 'arrow'];
 
 export function ShapeControls({

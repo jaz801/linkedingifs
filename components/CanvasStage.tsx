@@ -163,6 +163,25 @@ export function CanvasStage({
     };
   };
 
+  const getShapeCenter = (line: LineSegment) => {
+    // Only calculate center for shapes defined by points (Square, Circle, Pen)
+    if ((line.tool === 'square' || line.tool === 'circle' || line.tool === 'pen') && line.points.length > 0) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+      for (const p of line.points) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+
+      if (minX === Infinity) return null; // Should not happen if length > 0
+
+      return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+    }
+    return null;
+  };
+
   const renderLineEndCap = (line: LineSegment) => {
     if (line.endCap !== 'arrow') {
       return null;
@@ -434,6 +453,7 @@ export function CanvasStage({
                 const handleRadius = getHandleRadius(line);
                 const handleStrokeWidth = Math.max(0.35, line.strokeWidth * 0.35);
                 const handleStrokeColor = isSelected ? '#FFFFFF' : '#E6E6E6';
+                const shapeCenter = getShapeCenter(line);
 
                 return (
                   <g
@@ -569,6 +589,24 @@ export function CanvasStage({
                           );
                         })}
                       </g>
+                    )}
+                    {showHandles && shapeCenter && (
+                      <circle
+                        key={`${line.id}-center-handle`}
+                        data-line-id={line.id}
+                        data-handle-kind="translate"
+                        cx={shapeCenter.x}
+                        cy={shapeCenter.y}
+                        r={handleRadius * 1.0} // Slightly larger or same size
+                        fill="#FF6B00"
+                        stroke="#FFFFFF"
+                        strokeWidth={handleStrokeWidth}
+                        style={{ cursor: 'move' }}
+                        onPointerDown={handleLinePointerDown}
+                        onPointerMove={handleLinePointerMove}
+                        onPointerUp={handleLinePointerUp}
+                        onPointerCancel={handleLinePointerCancel}
+                      />
                     )}
                     {line.shapeType && line.shapeCount > 0 && line.animateShapes && (
                       <g style={{ pointerEvents: 'none' }}>

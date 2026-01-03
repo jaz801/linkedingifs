@@ -91,5 +91,6 @@ export type DragState = {
   pointStart?: LinePoint; // Initial position of the point
   lineIndex: number;
   translateBounds: TranslateBounds | null;
+  originalPoints?: PathNode[]; // Snapshot of points for shape translation
 };
 

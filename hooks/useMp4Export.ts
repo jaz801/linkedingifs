@@ -81,7 +81,73 @@ export function useMp4Export() {
             // NOTE: page.tsx already scales coordinates to pixels. We use lines directly.
 
 
-            const drawAnimatedShapes = (context: CanvasRenderingContext2D, line: RenderLineInput, frameIndex: number, totalFramesCount: number) => {
+            // Pre-calculate motion paths for animated shapes to ensure "paced" (constant speed) movement
+            // This matches SVG <animateMotion> default behavior.
+            const motionPaths = new Map<number, {
+                totalLength: number;
+                samples: { dist: number; point: { x: number; y: number } }[];
+            }>();
+
+            lines.forEach((line, index) => {
+                if (!line.shapeType || !line.animateShapes || (line.shapeCount || 0) <= 0) return;
+
+                // Create a LUT (Look Up Table) for the path
+                const samplesCount = 200; // Granularity for smooth motion
+                const samples: { dist: number; point: { x: number; y: number } }[] = [];
+                let totalLength = 0;
+                let prevPoint = evaluateLinePoint(line, 0);
+
+                samples.push({ dist: 0, point: prevPoint });
+
+                for (let i = 1; i <= samplesCount; i++) {
+                    const t = i / samplesCount;
+                    const point = evaluateLinePoint(line, t);
+                    const dist = Math.hypot(point.x - prevPoint.x, point.y - prevPoint.y);
+                    totalLength += dist;
+                    samples.push({ dist: totalLength, point });
+                    prevPoint = point;
+                }
+
+                motionPaths.set(index, { totalLength, samples });
+            });
+
+            const getPointOnPath = (lineIndex: number, progress: number) => {
+                const motionPath = motionPaths.get(lineIndex);
+                // Fallback to standard evaluation if no LUT (shouldn't happen for animate lines)
+                if (!motionPath || motionPath.totalLength === 0) {
+                    return {
+                        point: evaluateLinePoint(lines[lineIndex], progress),
+                        angle: Math.atan2(
+                            evaluateLineTangent(lines[lineIndex], progress).dy,
+                            evaluateLineTangent(lines[lineIndex], progress).dx
+                        )
+                    };
+                }
+
+                const targetDist = progress * motionPath.totalLength;
+
+                // Find sample segment
+                let upperIndex = motionPath.samples.findIndex(s => s.dist >= targetDist);
+                if (upperIndex === -1) upperIndex = motionPath.samples.length - 1;
+                const lowerIndex = Math.max(0, upperIndex - 1);
+
+                const lower = motionPath.samples[lowerIndex];
+                const upper = motionPath.samples[upperIndex];
+
+                const segmentLen = upper.dist - lower.dist;
+                const segmentProgress = segmentLen > 0 ? (targetDist - lower.dist) / segmentLen : 0;
+
+                // Linear interpolation between samples
+                const x = lower.point.x + (upper.point.x - lower.point.x) * segmentProgress;
+                const y = lower.point.y + (upper.point.y - lower.point.y) * segmentProgress;
+
+                // Calculate angle based on the segment vector
+                const angle = Math.atan2(upper.point.y - lower.point.y, upper.point.x - lower.point.x);
+
+                return { point: { x, y }, angle };
+            };
+
+            const drawAnimatedShapes = (context: CanvasRenderingContext2D, line: RenderLineInput, lineIndex: number, frameIndex: number, totalFramesCount: number) => {
                 if (!line.shapeType || !line.animateShapes || (line.shapeCount || 0) <= 0) {
                     return;
                 }
@@ -90,7 +156,6 @@ export function useMp4Export() {
                 // line.objectSize is already scaled in page.tsx buildRenderPayload
                 const size = line.objectSize ? Math.max(0.1, line.objectSize) : Math.max(1.5, line.strokeWidth * 1.5);
                 const animDuration = 2.8; // Seconds, matching CanvasStage
-                const totalAnimFrames = Math.round(animDuration * fps);
 
                 // We need to loop count times to draw each shape instance
                 for (let index = 0; index < count; index++) {
@@ -100,9 +165,7 @@ export function useMp4Export() {
                     const effectiveTime = (currentTime + timeOffset) % animDuration;
                     const progress = effectiveTime / animDuration;
 
-                    const point = evaluateLinePoint(line, progress);
-                    const tangent = evaluateLineTangent(line, progress);
-                    const angle = Math.atan2(tangent.dy, tangent.dx);
+                    const { point, angle } = getPointOnPath(lineIndex, progress);
 
                     let opacity = 0;
                     if (progress < 0.1) {
@@ -115,6 +178,7 @@ export function useMp4Export() {
 
                     if (opacity <= 0.01) continue;
 
+                    /*
                     if (frameIndex % 30 === 0 && index === 0) {
                         console.log(`Animated Shape Debug [Frame ${frameIndex}]`, {
                             type: line.shapeType,
@@ -123,6 +187,7 @@ export function useMp4Export() {
                             progress
                         });
                     }
+                    */
 
                     context.save();
                     context.translate(point.x, point.y);
@@ -161,10 +226,29 @@ export function useMp4Export() {
                 // Clear and draw background
                 ctx.fillStyle = '#000';
                 ctx.fillRect(0, 0, exportWidth, exportHeight);
-                ctx.drawImage(bgImage, 0, 0, exportWidth, exportHeight);
+
+                // Draw background with "object-fit: cover" logic
+                if (bgImage.width > 0 && bgImage.height > 0) {
+                    const imageAspect = bgImage.width / bgImage.height;
+                    const canvasAspect = exportWidth / exportHeight;
+
+                    let drawX = 0, drawY = 0, drawW = exportWidth, drawH = exportHeight;
+
+                    if (imageAspect > canvasAspect) {
+                        // Image is wider than canvas: crop sides
+                        drawW = exportHeight * imageAspect;
+                        drawX = (exportWidth - drawW) / 2;
+                    } else {
+                        // Image is taller than canvas: crop top/bottom
+                        drawH = exportWidth / imageAspect;
+                        drawY = (exportHeight - drawH) / 2;
+                    }
+
+                    ctx.drawImage(bgImage, drawX, drawY, drawW, drawH);
+                }
 
                 // Draw Lines
-                lines.forEach(line => {
+                lines.forEach((line, lineIndex) => {
                     if (line.points && line.points.length > 0) {
                         ctx.save();
                         ctx.beginPath();
@@ -254,7 +338,7 @@ export function useMp4Export() {
                     }
 
                     // Draw Animated Shapes (New Logic)
-                    drawAnimatedShapes(ctx, line, i, totalFrames);
+                    drawAnimatedShapes(ctx, line, lineIndex, i, totalFrames);
                 });
 
                 // Draw Objects (Legacy support if 'objects' is populated, e.g. from older code or different features)
