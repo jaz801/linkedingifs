@@ -7,43 +7,8 @@
 // Fixed blob creation to use Uint8Array directly instead of ArrayBuffer slicing, and added validation to ensure the converted GIF data is not empty before creating the blob.
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
-
-let ffmpegInstance: FFmpeg | null = null;
-let isLoading = false;
-let loadPromise: Promise<FFmpeg> | null = null;
-
-/**
- * Load and initialize FFmpeg.wasm
- * This is cached so subsequent calls return the same instance
- */
-async function loadFFmpeg(): Promise<FFmpeg> {
-    if (ffmpegInstance) {
-        return ffmpegInstance;
-    }
-
-    if (isLoading && loadPromise) {
-        return loadPromise;
-    }
-
-    isLoading = true;
-    loadPromise = (async () => {
-        const ffmpeg = new FFmpeg();
-
-        // Load FFmpeg core from CDN
-        const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-        await ffmpeg.load({
-            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-        });
-
-        ffmpegInstance = ffmpeg;
-        isLoading = false;
-        return ffmpeg;
-    })();
-
-    return loadPromise;
-}
+import { fetchFile } from '@ffmpeg/util';
+import { loadFFmpeg } from './ffmpegUtils';
 
 export interface Mp4ToGifOptions {
     /**
@@ -196,11 +161,3 @@ export async function convertMp4ToGif(
     }
 }
 
-/**
- * Check if FFmpeg.wasm is supported in the current browser
- */
-export function isFFmpegSupported(): boolean {
-    // FFmpeg.wasm requires SharedArrayBuffer which needs specific headers
-    // or cross-origin isolation
-    return typeof SharedArrayBuffer !== 'undefined';
-}
